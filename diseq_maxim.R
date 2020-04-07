@@ -103,6 +103,10 @@ loglike.diseq.tobit.corr <- function (beta, y, X, idx_bd, idx_bs, idx_sd, idx_ss
   # } else {
   #   return(ret)
   # }
+  # From DEOptim docs: Note that DEoptim stops if any NA or NaN value is obtained.
+  # You have to redefine your function to handle these values (for instance, set
+  # NA to Inf in your objective function).
+
 }
 
 
@@ -129,6 +133,7 @@ fitdiseq <- function(demand_formula = NULL,
                      lb = NULL,
                      ub = NULL,
                      init = NULL,
+                     initpop = NULL,
                      corr = FALSE,
                      optimizer = 'SA',
                      control = (if (optimizer == 'SA') {list('verbose' = TRUE, 'max.time' = 1200)}
@@ -175,18 +180,22 @@ fitdiseq <- function(demand_formula = NULL,
         length(ub) != length(idx_bd) + length(idx_bs) + 2) {
       stop('Incorrect bound size.')
     }
-    if (!is.null(init) & length(init) != length(idx_bd) + length(idx_bs) + 2) {
-      # Átírás: amióta a teljes meglévő populációt eltároljuk a DE-ben, itt length helyett ncol kell!
+    if (!is.null(init) && length(init) != length(idx_bd) + length(idx_bs) + 2) {
       stop('Incorrect initial vector size.')
+    }
+    if (!is.null(initpop) && ncol(initpop) != length(idx_bd) + length(idx_bs) + 2) {
+      stop('Incorrect size of vectors in the initial population.')
     }
   } else {
     if (length(lb) != length(idx_bd) + length(idx_bs) + 3 |
         length(ub) != length(idx_bd) + length(idx_bs) + 3) {
       stop('Incorrect bound size.')
     }
-    if (!is.null(init) & length(init) != length(idx_bd) + length(idx_bs) + 3) {
-      # Átírás: amióta a teljes meglévő populációt eltároljuk a DE-ben, itt length helyett ncol kell!
+    if (!is.null(init) && length(init) != length(idx_bd) + length(idx_bs) + 3) {
       stop('Incorrect initial vector size.')
+    }
+    if (!is.null(initpop) && ncol(initpop) != length(idx_bd) + length(idx_bs) + 3) {
+      stop('Incorrect size of vectors in the initial population.')
     }
   }
 
@@ -197,29 +206,37 @@ fitdiseq <- function(demand_formula = NULL,
   }
 
   set.seed(random_seed)
+
   if (optimizer == 'SA') {
+
     list[neg_log_likelihood_opt, beta_opt, history] <-
       GenSA(init, loglike, lb, ub, control = control)
+
   } else if (optimizer == 'DE') {
-    if(!is.null(init)) {
-      control$initialpop <- init
-      # NP <- ifelse(!is.na(control$NP), control$NP, 10 * length(init))
-      # initrand <- runif((NP - 1) * length(init),
-      #                   min = rep(lb, times = NP - 1),
-      #                   max = rep(ub, times = NP - 1))
-      # initmat <- matrix(c(init, initrand),
-      #                   ncol = length(init),
-      #                   nrow = NP,
-      #                   byrow = TRUE)
-      # control$initialpop <- initmat
-      # control$NP <- NP
+
+    if(!is.null(initpop)) {
+      control$initialpop <- initpop
+    } else if(!is.null(init)) {
+      NP <- ifelse(!is.na(control$NP), control$NP, 10 * length(init))
+      initrand <- runif((NP - 1) * length(init),
+                        min = rep(lb, times = NP - 1),
+                        max = rep(ub, times = NP - 1))
+      initmat <- matrix(c(init, initrand),
+                        ncol = length(init),
+                        nrow = NP,
+                        byrow = TRUE)
+      control$initialpop <- initmat
+      control$NP <- NP
     }
+
     list[opt, member] <-
       DEoptim(loglike, lb, ub, control = control)
     neg_log_likelihood_opt <- opt$bestval
     beta_opt <- opt$bestmem
     history <- list(member$bestvalit, member$bestmemit, member$pop, member$storepop)
+
   } else if (optimizer == 'optim') {
+
     if (is.null(init)) {
       if (!corr) {
         init <- c(rep(0, length(idx_bd) + length(idx_bs)), 1, 1)
@@ -231,8 +248,11 @@ fitdiseq <- function(demand_formula = NULL,
       optim(init, loglike, method = method, control = control)
     history <- c(counts, convergence)
     names(history) = c(names(counts), 'convergence')
+
   } else {
+
     stop('Unknown optimizer. Use one of: SA, DE, optim.')
+
   }
 
   if (!corr) {
@@ -305,8 +325,8 @@ refitdiseq <- function(diseq_obj,
 
   if (is.null(init)) {
     if (continue) {
-      if (optimizer == "DE") {
-        init <- diseq_obj$optim_trace[[3]]
+      if (optimizer == "DE" && !is.null(diseq_obj$optim_trace[[3]])) {
+        initpop <- diseq_obj$optim_trace[[3]]
       } else {
         init <- diseq_obj$coefficients
         }
@@ -317,8 +337,10 @@ refitdiseq <- function(diseq_obj,
 
   if (is.null(elapsed_times)) {
     if (continue) {
+      # Append the elapsed times with a new value
       elapsed_times <- diseq_obj$elapsed_times
     } else {
+      # Replace the last elapsed time with a new value
       elapsed_times <- diseq_obj$elapsed_times[-length(diseq_obj$elapsed_times)]
     }
   }
