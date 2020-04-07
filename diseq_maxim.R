@@ -1,0 +1,721 @@
+library(data.table)
+library(GenSA)
+library(DEoptim)
+library(gsubfn)
+library(numDeriv)
+library(mvtnorm)
+library(foreach)
+library(parallel)
+
+# makes it possible to unpack lists returned by functions
+list <- structure(NA, class = "result")
+"[<-.result" <- function(x, ..., value) {
+  args <- as.list(match.call())
+  args <- args[-c(1:2, length(args))]
+  length(value) <- length(args)
+  for (i in seq(along = args)) {
+    a <- args[[i]]
+    if (!missing(a))
+      eval.parent(substitute(a <- v, list(a = a, v = value[[i]])))
+  }
+  x
+}
+
+loglike.diseq.tobit <- function (beta, y, X, idx_bd, idx_bs, idx_sd, idx_ss) {
+  theta1 <- X[, idx_bd] %*% beta[idx_bd]
+  theta2 <- X[, idx_bs] %*% beta[idx_bs]
+  s1 <- beta[idx_sd]
+  s2 <- beta[idx_ss]
+  #f1 <- dnorm(y, mean=theta1, sd=sigma1)
+  f1 <- dnorm(y, mean=theta1, sd=exp(s1))
+  #f2 <- dnorm(y, mean=theta2, sd=sigma2)
+  f2 <- dnorm(y, mean=theta2, sd=exp(s2))
+  F1 <- 1 - pnorm((y-theta1) / exp(s1))
+  F2 <- 1 - pnorm((y-theta2) / exp(s2))
+  G <- ifelse(y > 0, f1*F2 + f2*F1, 1 - F1*F2)
+  -sum(log(G))
+}
+
+mvnorm_exact <- function(theta1, sigma1, theta2, sigma2, rho) {
+  mvnorm_scalar_fun <- function(theta1, sigma1, theta2, sigma2, rho) { 
+    pmvnorm(lower = c(-Inf, -Inf),
+            upper = c(0, 0),
+            mean = c(theta1, theta2),
+            sigma = matrix(c(sigma1^2, sigma1*sigma2*rho,
+                             sigma1*sigma2*rho, sigma2^2),
+                           nrow = 2)
+    )[1]
+  }
+  
+  mapply(mvnorm_scalar_fun, theta1, sigma1, theta2, sigma2, rho)
+}
+
+mvnorm_approx <- function(theta1, sigma1, theta2, sigma2, rho) {
+  a <- -theta1 / sigma1
+  b <- -theta2 / sigma2
+  c <- ifelse(abs(a) >= abs(b), a, b)
+  d <- ifelse(abs(a) >= abs(b), b, a)
+  
+  h <- ifelse(c <= 0, c, -c)
+  k <- d
+  r <- ifelse(c <= 0, rho, -rho)
+  
+  mu_approx <- -r * ifelse(h > -30, dnorm(h) / pnorm(h), -h)
+  sigma_approx <- 1 + r * h * mu_approx - mu_approx ^ 2
+  B <- pnorm(h) * pnorm(k, mean = mu_approx, sd = sqrt(sigma_approx))
+  F_00 <- ifelse(c <= 0, B, pnorm(k) - B)
+  
+  return(F_00)
+}
+
+loglike.diseq.tobit.corr <- function (beta, y, X, idx_bd, idx_bs, idx_sd, idx_ss, idx_corr) {
+  theta1 <- X[, idx_bd] %*% beta[idx_bd]
+  theta2 <- X[, idx_bs] %*% beta[idx_bs]
+  sigma1 <- beta[idx_sd]
+  sigma2 <- beta[idx_ss]
+  rho <- beta[idx_corr]
+  
+  # y > 0 eset (F1, F2 feltételes eloszlások) - Maddala & nelson
+  f1 <- dnorm(y, mean=theta1, sd=sigma1)
+  f2 <- dnorm(y, mean=theta2, sd=sigma2)
+  F1 <- 1 - pnorm(y, mean = theta1 + sigma1 / sigma2 * rho * (y - theta2), sd = sqrt(1 - rho^2) * sigma1)
+  F2 <- 1 - pnorm(y, mean = theta2 + sigma2 / sigma1 * rho * (y - theta1), sd = sqrt(1 - rho^2) * sigma2)
+  
+  # y < 0 esetre együttes eloszlás közelítése - Mee & Owen 1982
+  F_00 <- mvnorm_approx(theta1, sigma1, theta2, sigma2, rho)
+  G <- ifelse(y > 0, f1*F2 + f2*F1, 
+                     pnorm(0, mean=theta1, sd=sigma1) + pnorm(0, mean=theta2, sd=sigma2) - F_00)
+  -sum(log(G))
+  # if (is.na(ret)) {  # kérdés: miért van NaN?
+  #   return(Inf)
+  # } else {
+  #   return(ret)
+  # }
+}
+
+model.matrix.diseq <- function (demand_formula, supply_formula, data) {
+  X_d <- model.matrix(formula(demand_formula), data = data)
+  X_s <- model.matrix(formula(supply_formula), data = data)
+  rows <- intersect(rownames(X_d), rownames(X_s))
+  n_d <- ncol(X_d)
+  n_s <- ncol(X_s)
+  coef_indices <- list(
+    'beta_demand' = 1 : n_d,
+    'beta_supply' = (n_d+1) : (n_d+n_s),
+    'sigma_demand' = n_d+n_s+1,
+    'sigma_supply' = n_d+n_s+2,
+    'sigma_corr' = n_d+n_s+3
+  )
+  list(cbind(X_d[rows, ], X_s[rows, ]), coef_indices)
+}
+
+fitdiseq <- function(demand_formula = NULL,
+                     supply_formula = NULL,
+                     data = NULL,
+                     lb = NULL,
+                     ub = NULL,
+                     init = NULL,
+                     corr = FALSE,
+                     optimizer = 'SA',
+                     control = (if (optimizer == 'SA') {list('verbose' = TRUE, 'max.time' = 1200)}
+                                else if (optimizer == 'DE') {DEoptim.control(trace = TRUE, itermax = 1000)}
+                                else if (optimizer == 'optim') {list('trace' = TRUE)}),
+                     method = 'Nelder-Mead',
+                     na.action = na.exclude,
+                     random_seed = 1991,
+                     elapsed_times = list()
+                     ) {
+  
+  cl <- match.call()
+  t0 <- Sys.time()
+  cat(paste('Starting estimation at', t0, '\n'))
+
+  mf <- na.action(data[, union(all.vars(demand_formula), all.vars(supply_formula)), with=FALSE])
+  attr(mf, 'demand_terms') <- terms(demand_formula)
+  attr(mf, 'supply_terms') <- terms(supply_formula)
+  y <- mf[[all.vars(demand_formula[[2]])]]
+  list[X, coef_indices] = model.matrix.diseq(demand_formula, supply_formula, data=mf)
+  idx_bd <- coef_indices[['beta_demand']]
+  idx_bs <- coef_indices[['beta_supply']]
+  idx_sd <- coef_indices[['sigma_demand']]
+  idx_ss <- coef_indices[['sigma_supply']]
+  if (corr) {
+    idx_corr <- coef_indices[['sigma_corr']]
+  }
+  
+  if (is.null(lb)) {
+    lb <- c(rep(-10, length(idx_bd) + length(idx_bs)), -5, -5)
+    if (corr) {
+      lb <- c(lb, -1)
+    }
+  }
+  if (is.null(ub)) {
+    ub <- c(rep(10, length(idx_bd) + length(idx_bs) + 2))
+    if (corr) {
+      ub <- c(ub, 1)
+    }
+  }
+  
+  if (!corr) {
+    if (length(lb) != length(idx_bd) + length(idx_bs) + 2 |
+        length(ub) != length(idx_bd) + length(idx_bs) + 2) {
+      stop('Incorrect bound size.')
+    }
+    if (!is.null(init) & length(init) != length(idx_bd) + length(idx_bs) + 2) {
+      # Átírás: amióta a teljes meglévő populációt eltároljuk a DE-ben, itt length helyett ncol kell!
+      stop('Incorrect initial vector size.')
+    }
+  } else {
+    if (length(lb) != length(idx_bd) + length(idx_bs) + 3 |
+        length(ub) != length(idx_bd) + length(idx_bs) + 3) {
+      stop('Incorrect bound size.')
+    }
+    if (!is.null(init) & length(init) != length(idx_bd) + length(idx_bs) + 3) {
+      # Átírás: amióta a teljes meglévő populációt eltároljuk a DE-ben, itt length helyett ncol kell!
+      stop('Incorrect initial vector size.')
+    }
+  }
+
+  if (!corr) {
+    loglike <- function(beta) loglike.diseq.tobit(beta, y, X, idx_bd, idx_bs, idx_sd, idx_ss)
+  } else {
+    loglike <- function(beta) loglike.diseq.tobit.corr(beta, y, X, idx_bd, idx_bs, idx_sd, idx_ss, idx_corr)
+  }
+  
+  set.seed(random_seed)
+  if (optimizer == 'SA') {
+    list[neg_log_likelihood_opt, beta_opt, history, ] <-
+      GenSA(init, loglike, lb, ub, control = control)
+  } else if (optimizer == 'DE') {
+    if(!is.null(init)) {
+      control$initialpop <- init
+      # NP <- ifelse(!is.na(control$NP), control$NP, 10 * length(init))
+      # initrand <- runif((NP - 1) * length(init),
+      #                   min = rep(lb, times = NP - 1),
+      #                   max = rep(ub, times = NP - 1))
+      # initmat <- matrix(c(init, initrand),
+      #                   ncol = length(init),
+      #                   nrow = NP,
+      #                   byrow = TRUE)
+      # control$initialpop <- initmat
+      # control$NP <- NP
+    }
+    list[opt, member] <-
+      DEoptim(loglike, lb, ub, control = control)
+    neg_log_likelihood_opt <- opt$bestval
+    beta_opt <- opt$bestmem
+    history <- list(member$bestvalit, member$bestmemit, member$pop, member$storepop)
+  } else if (optimizer == 'optim') {
+    if (is.null(init)) {
+      if (!corr) {
+        init <- c(rep(0, length(idx_bd) + length(idx_bs)), 1, 1)
+      } else {
+        init <- c(rep(0, length(idx_bd) + length(idx_bs)), 1, 1, 0)
+      }
+    }
+    list[beta_opt, neg_log_likelihood_opt, counts, convergence] <-
+      optim(init, loglike, method = method, control = control)
+    history <- c(counts, convergence)
+    names(history) = c(names(counts), 'convergence')
+  } else {
+    stop('Unknown optimizer. Use one of: SA, DE, optim.')
+  }
+  
+  if (!corr) {
+    names(beta_opt) <- c(
+      paste0(colnames(X)[idx_bd], ' - d'),
+      paste0(colnames(X)[idx_bs], ' - s'),
+      'sigma_demand',
+      'sigma_supply'
+    )
+  } else {
+    names(beta_opt) <- c(
+      paste0(colnames(X)[idx_bd], ' - d'),
+      paste0(colnames(X)[idx_bs], ' - s'),
+      'sigma_demand',
+      'sigma_supply',
+      'rho'
+    )
+  }
+  
+  t1 <- Sys.time()
+  cat(paste('Estimation finished at', t1, '\n'))
+  t_delta = difftime(t1, t0)
+  
+  diseq_obj <- list(
+    'coefficients' = beta_opt,
+    'coef_indices' = coef_indices, 
+    'call' = cl,
+    'demand_terms' = terms(demand_formula),
+    'supply_terms' = terms(supply_formula),
+    'model' = mf,
+    'log_likelihood' = -neg_log_likelihood_opt,
+    'orig_rownames' = rownames(data),
+    'N' = nrow(mf),
+    'optim_trace' = history,
+    'settings' = list(
+      'lb' = lb,
+      'ub' = ub,
+      'init' = init,
+      'optimizer' = optimizer,
+      'control' = control,
+      'method' = method,
+      'corr' = corr
+    ),
+    'na.action' = na.action,
+    'random_seed' = random_seed,
+    'elapsed_times' = c(elapsed_times, list(t_delta))
+  )
+  attr(diseq_obj, 'class') <- 'diseq'
+  return(diseq_obj)
+
+}
+
+refitdiseq <- function(diseq_obj,
+                       demand_formula = formula(diseq_obj$demand_terms),
+                       supply_formula = formula(diseq_obj$supply_terms),
+                       data = diseq_obj$model,
+                       lb = diseq_obj$settings$lb,
+                       ub = diseq_obj$settings$ub,
+                       init = NULL,
+                       corr = diseq_obj$settings$corr,
+                       optimizer = diseq_obj$settings$optimizer,
+                       control = diseq_obj$settings$control,
+                       method = diseq_obj$settings$method,
+                       na.action = diseq_obj$na.action,
+                       random_seed = diseq_obj$random_seed,
+                       elapsed_times = NULL,
+                       continue = TRUE
+                       ) {
+  
+  if (is.null(init)) {
+    if (continue) {
+      if (optimizer == "DE") {
+        init <- diseq_obj$optim_trace[[3]]
+      } else {
+        init <- diseq_obj$coefficients
+        }
+    } else {
+      init <- diseq_obj$settings$init
+    }
+  }
+  
+  if (is.null(elapsed_times)) {
+    if (continue) {
+      elapsed_times <- diseq_obj$elapsed_times
+    } else {
+      elapsed_times <- diseq_obj$elapsed_times[-length(diseq_obj$elapsed_times)]
+    }
+  }
+  
+  if(is.null(corr)) {
+    corr <- FALSE
+  }
+  
+  fitdiseq(
+    demand_formula = demand_formula,
+    supply_formula = supply_formula,
+    data = data,
+    lb = lb,
+    ub = ub,
+    init = init,
+    corr = corr,
+    optimizer = optimizer,
+    control = control,
+    method = method,
+    na.action = na.action,
+    random_seed = random_seed,
+    elapsed_times = elapsed_times
+  )
+  
+}
+
+print.diseq <- function(diseq_obj) {
+  
+  cat('\nCall:\n')
+  print(diseq_obj$call)
+  cat('\n')
+  
+  cat('Demand equation:\n')
+  print(diseq_obj$coefficients[ diseq_obj$coef_indices[['beta_demand']] ])
+  print(diseq_obj$coefficients[ diseq_obj$coef_indices[['sigma_demand']] ])
+  cat('\n')
+  
+  cat('Supply equation:\n')
+  print(diseq_obj$coefficients[ diseq_obj$coef_indices[['beta_supply']] ])
+  print(diseq_obj$coefficients[ diseq_obj$coef_indices[['sigma_supply']] ])
+  cat('\n')
+  
+  if (!is.null(diseq_obj$settings$corr) && diseq_obj$settings$corr) {
+    cat('Correlation of error terms:\n')
+    print(diseq_obj$coefficients[ diseq_obj$coef_indices[['sigma_corr']] ])
+    cat('\n')
+  }
+  
+}
+
+predict.diseq <- function(diseq_obj,
+                          newdata = NULL,
+                          type='prob_supply_constrained',
+                          na.action = diseq_obj$na.action,
+                          prob_without_positive_demand = FALSE,
+                          exact = TRUE) {
+  
+  corr <- !is.null(diseq_obj$settings$corr) && diseq_obj$settings$corr == TRUE
+  
+  if (is.null(newdata)) {
+    list[X, coef_indices] = model.matrix.diseq(
+      diseq_obj$demand_terms,
+      diseq_obj$supply_terms,
+      data = diseq_obj$model)
+    orig_rownames <- diseq_obj$orig_rownames
+  } else {
+    list[X, coef_indices] = model.matrix.diseq(
+      update(diseq_obj$demand_terms, NULL ~ .),
+      update(diseq_obj$supply_terms, NULL ~ .),
+      data = na.action(newdata[, union(all.vars(update(diseq_obj$demand_terms, NULL ~ .)),
+                                       all.vars(update(diseq_obj$supply_terms, NULL ~ .))
+                                       ),
+                               with=FALSE])
+      )
+    orig_rownames <- rownames(newdata)
+  }
+  new_rownames <- rownames(X)
+
+  idx_bd <- coef_indices[['beta_demand']]
+  idx_bs <- coef_indices[['beta_supply']]
+  idx_sd <- coef_indices[['sigma_demand']]
+  idx_ss <- coef_indices[['sigma_supply']]
+  if (!corr) {
+    idx_corr <- coef_indices[['sigma_corr']]
+  }
+  beta_opt <- diseq_obj$coefficients
+  
+  predicted_demand <- X[, idx_bd] %*% beta_opt[idx_bd]
+  predicted_supply <- X[, idx_bs] %*% beta_opt[idx_bs]
+  
+  if (type == 'prob_supply_constrained') {
+    
+    if (prob_without_positive_demand == TRUE) {
+      
+      if (!corr) {
+        sigma <- sqrt(beta_opt[idx_sd]^2 + beta_opt[idx_ss]^2)
+      } else {
+        sigma <- sqrt(beta_opt[idx_sd]^2 + beta_opt[idx_ss]^2 - 2*beta_opt[idx_corr]*beta_opt[idx_sd]*beta_opt[idx_ss])
+      }
+      prob_supply_constrained <- pnorm((predicted_demand-predicted_supply) / sigma)
+      
+    } else {
+      
+      mvnorm_fun <- if (exact == TRUE) {mvnorm_exact} else {mvnorm_approx}
+      
+      # A P(D > S metszet D > 0) = P(S - D < 0 metszet -D < 0) együttes eloszlása
+      # levezetés papíron Peti mappájában (térkép!)
+      if (corr) {
+        corr_coef_ds <- beta_opt[idx_corr]
+      } else {
+        corr_coef_ds <- 0
+      }
+      mu_1 <- predicted_supply - predicted_demand
+      mu_2 <- -predicted_demand
+      sigma_1 <- sqrt(beta_opt[idx_sd]^2 + beta_opt[idx_ss]^2 - 2*corr_coef_ds*beta_opt[idx_sd]*beta_opt[idx_ss])
+      sigma_2 <- beta_opt[idx_sd]
+      corr_coef <- beta_opt[idx_sd] / beta_opt[idx_ss] - corr_coef_ds
+      
+      prob_supply_constrained <- mvnorm_fun(mu_1, sigma_1, mu_2, sigma_2, corr_coef)
+      
+    }
+    
+    out <- prob_supply_constrained
+    
+  } else if (type == 'demand') {
+    out <- predicted_demand
+  } else if (type == 'supply') {
+    out <- predicted_supply
+  } else if (type == 'response') {
+    out <- pmax(0, pmin(predicted_supply, predicted_demand))
+  } else {
+    stop('Unknown prediction type. Use one of: prob_supply_constrained, demand, supply, response.')
+  }
+  
+  if (identical(na.action, na.exclude)) {
+    out_final <- rep(NA, times = length(orig_rownames))
+    names(out_final) <- orig_rownames
+    out_final[new_rownames] <- out
+  }
+  else {
+    out_final <- out
+  }
+  return(out_final)
+  
+}
+
+{
+# FIM.diseq <- function(beta, X, y, idx_bd, idx_bs, idx_sd, idx_ss) {
+#   theta1 <-X[, idx_bd] %*% beta[idx_bd]
+#   theta2 <-X[, idx_bs] %*% beta[idx_bs]
+#   sigma1 <- beta[idx_sd]
+#   sigma2 <- beta[idx_ss]
+#   f1 <- dnorm(y, mean=theta1, sd=sigma1)
+#   f2 <- dnorm(y, mean=theta2, sd=sigma2)
+#   F1 <- 1 - pnorm((y-theta1) / sigma1)
+#   F2 <- 1 - pnorm((y-theta2) / sigma2)
+#   G <- ifelse(y > 0, f1*F2 + f2*F1, 1 - F1*F2)
+#   h1 <- (y - theta1) / sigma1
+#   h2 <- (y - theta2) / sigma2
+#   
+#   g_bd <- ifelse(y > 0,
+#                  (f1*h1*F2/sigma1 + f1*f2) / G,
+#                  -(f1*F2) / G
+#                  )
+#   g_bs <- ifelse(y > 0,
+#                  (f2*h2*F1/sigma2 + f1*f2) / G,
+#                  -(f2*F1) / G
+#                  )
+#   g_sd <- ifelse(y > 0,
+#                  (f1*F2*(h1^2-1) / (2*sigma1^2) + f1*f2*h1 / (2*sigma1)) / G,
+#                  -(f1*h1*F2 / (2*sigma1)) / G
+#                  )
+#   g_ss <- ifelse(y > 0,
+#                  (f2*F1*(h2^2-1) / (2*sigma2^2) + f1*f2*h2 / (2*sigma2)) / G,
+#                  -(f2*h2*F1 / (2*sigma2)) / G
+#                  )
+#   
+#   h_bd_bd <- ifelse(y > 0,
+#                     (f1*F2*(h1^2-1) / sigma1^2 + f1*f2*h1/sigma1) / G - g_bd*g_bd,
+#                     -(F2*f1*h1 / sigma1) / G - g_bd*g_bd
+#                     )
+#   h_bd_sd <- ifelse(y > 0,
+#                     (f1*h1*F2*(h1^2-3) / (2*sigma1^3) + f1*f2*(h1^2-1) / (2*sigma1^2)) / G - g_bd*g_bs,
+#                     -(F2*f1*(h1^2-1) / (2*sigma1^2)) / G - g_bd*g_bs
+#                     )
+#   h_bd_bs <- ifelse(y > 0,
+#                     (f1*f2*h1/sigma1 + f1*f2*h2/sigma2) / G - g_bd*g_bs,
+#                     -(f1*f2) / G - g_bd*g_bs
+#                     )
+#   h_bd_ss <- ifelse(y > 0,
+#                     (f2*f1*(h2^2-2) / (2*sigma2^2) + f1*f2*h1*h2 / (2*sigma1*sigma2)) / G - g_bd*g_ss,
+#                     -(f2*h2*f1 / (2*sigma2)) / G - g_bd*g_ss
+#                     )
+#   h_sd_sd <- ifelse(y > 0,
+#                     (f1*F2*(h1^4-6*h1^2+3) / (4*sigma1^4) + f1*f2*h1*(h1^2-3) / (4*sigma1^3)) / G - g_sd*g_sd,
+#                     -(F2*f1*h1*(h1^2-3) / (4*sigma1^3)) / G - g_sd*g_sd
+#                     )
+#   h_sd_bs <- ifelse(y > 0,
+#                     (f1*f2*(h1^2-1) / (2*sigma1^2) + f1*f2*h1*h2 / (2*sigma1*sigma2)) / G - g_sd*g_bs,
+#                     -(f1*h1*f2 / (2*sigma1)) / G - g_sd*g_bs
+#                     )
+#   h_sd_ss <- ifelse(y > 0,
+#                     ((f1*f2) / (4*sigma1*sigma2) * (h2*(h1^2-1)/sigma1 + h1*(h2^2-1)/sigma2)) / G - g_sd*g_ss,
+#                     -(f1*h1*f2*h2 / (2*sigma1*2*sigma2)) / G - g_sd*g_ss
+#                     )
+#   h_bs_bs <- ifelse(y > 0,
+#                     (f2*F1*(h2^2-1) / sigma2^2 + f2*f1*h2 / sigma2) / G - g_bs*g_bs,
+#                     -(F1*f2*h2 / sigma2) / G - g_bs*g_bs
+#                     )
+#   h_bs_ss <- ifelse(y > 0,
+#                     (f2*h2*F1*(h2^2-3) / (2*sigma2^3) + f2*f1*(h2^2-1) / (2*sigma2^2)) / G - g_bs*g_ss,
+#                     -(F1*f2*(h2^2-1) / (2*sigma2^2)) / G - g_bs*g_ss
+#                     )
+#   h_ss_ss <- ifelse(y > 0,
+#                     (f2*F1*(h2^4-6*h2^2+3) / (4*sigma2^2) + f2*f1*h2*(h2^2-3) / (4*sigma2^3)) / G - g_ss*g_ss,
+#                     -(F1*f2*h2*(h2^2-3) / (4*sigma2^3)) / G - g_ss*g_ss
+#   )
+#   
+#   H_bd_bd <- (h_bd_bd * t(X[, idx_bd])) %*% X[, idx_bd]
+#   H_bd_sd <- t(t(colSums(h_bd_sd * X[, idx_bd])))
+#   H_bd_bs <- (h_bd_bs * t(X[, idx_bd])) %*% X[, idx_bs]
+#   H_bd_ss <- t(t(colSums(h_bd_ss * X[, idx_bd])))
+#   H_sd_sd <- sum(h_sd_sd)
+#   H_sd_bs <- t(colSums(h_sd_bs * X[, idx_bs]))
+#   H_sd_ss <- sum(h_sd_ss)
+#   H_bs_bs <- (h_bs_bs * t(X[, idx_bs])) %*% X[, idx_bs]
+#   H_bs_ss <- t(t(colSums(h_bs_ss * X[, idx_bs])))
+#   H_ss_ss <- sum(h_ss_ss)
+#   
+#   H <- rbind(
+#     cbind(   H_bd_bd ,   H_bd_bs ,   H_bd_sd , H_bd_ss),
+#     cbind( t(H_bd_bs),   H_bs_bs , t(H_sd_bs), H_bs_ss),
+#     cbind( t(H_bd_sd),   H_sd_bs ,   H_sd_sd , H_sd_ss),
+#     cbind( t(H_bd_ss), t(H_bs_ss),   H_sd_ss , H_ss_ss)
+#   )
+#   
+#   return(-H / nrow(X)) # observed Fischer information matrix
+#   
+# }
+}
+
+summary.diseq <- function(diseq_obj) {
+
+  corr <- !is.null(diseq_obj$settings$corr) && diseq_obj$settings$corr == TRUE
+  
+  y <- diseq_obj$model[[all.vars(formula(diseq_obj$demand_terms)[[2]])]]
+  list[X, coef_indices] = model.matrix.diseq(
+    diseq_obj$demand_terms,
+    diseq_obj$supply_terms,
+    data = diseq_obj$model)
+  idx_bd <- coef_indices[['beta_demand']]
+  idx_bs <- coef_indices[['beta_supply']]
+  idx_sd <- coef_indices[['sigma_demand']]
+  idx_ss <- coef_indices[['sigma_supply']]
+  if (corr) {
+    idx_corr <- coef_indices[['sigma_corr']]
+  }
+  beta_opt <- diseq_obj$coefficients
+  
+  # I_opt <- FIM.diseq(beta_opt, X, y, idx_bd, idx_bs, idx_sd, idx_ss)
+  if (!corr) {
+    loglike <- function(beta) loglike.diseq.tobit(beta, y, X, idx_bd, idx_bs, idx_sd, idx_ss)
+  } else {
+    loglike <- function(beta) loglike.diseq.tobit.corr(beta, y, X, idx_bd, idx_bs, idx_sd, idx_ss, idx_corr)
+  }
+  
+  I_opt <- hessian(loglike, beta_opt)
+  
+  std_err <- sqrt(diag(solve(I_opt)))
+  t_value <- beta_opt / std_err
+  p_value <- pnorm(-abs(t_value)) * 2
+  
+  diseq_summary_obj <- list(
+    'coefficients' = as.matrix(data.frame(
+      'Estimate' = beta_opt,
+      'Std. Error' = std_err,
+      't value' = t_value,
+      'Pr(>[t])' = p_value,
+      row.names = names(beta_opt)
+    )),
+    'call' = diseq_obj$call,
+    'demand_terms' = diseq_obj$demand_terms,
+    'supply_terms' = diseq_obj$supply_terms,
+    'corr' = corr,
+    'coef_indices' = diseq_obj$coef_indices,
+    'log_likelihood' = diseq_obj$log_likelihood,
+    'N' = diseq_obj$N,
+    'orig_rownames' = diseq_obj$orig_rownames,
+    'optim_trace' = diseq_obj$optim_trace,
+    'na.action' = diseq_obj$na.action
+  )
+  attr(diseq_summary_obj, 'class') <- 'summary.diseq'
+  return(diseq_summary_obj)
+  
+}
+
+print.summary.diseq <- function(diseq_summary_obj) {
+  
+  corr <- !is.null(diseq_summary_obj$corr) && diseq_summary_obj$corr == TRUE
+  
+  idx_bd <- diseq_summary_obj$coef_indices[['beta_demand']]
+  idx_bs <- diseq_summary_obj$coef_indices[['beta_supply']]
+  idx_sd <- diseq_summary_obj$coef_indices[['sigma_demand']]
+  idx_ss <- diseq_summary_obj$coef_indices[['sigma_supply']]
+  if (corr) {
+    idx_corr <- diseq_summary_obj$coef_indices[['sigma_corr']]
+  }
+  
+  est_table_demand <- as.data.frame(diseq_summary_obj$coefficients[c(idx_bd, idx_sd), ])
+  est_table_supply <- as.data.frame(diseq_summary_obj$coefficients[c(idx_bs, idx_ss), ])
+  if (corr) {
+    est_table_corr <- as.data.frame(diseq_summary_obj$coefficients[idx_corr, , drop = FALSE])
+  }
+  
+  cat('\nCall:\n')
+  print(diseq_summary_obj$call)
+  cat('\n')
+  
+  cat('Demand equation:\n')
+  print(est_table_demand)
+  cat('\n')
+  
+  cat('Supply equation:\n')
+  print(est_table_supply)
+  cat('\n')
+  
+  if (corr) {
+    cat('Correlation of error terms:\n')
+    print(est_table_corr)
+    cat('\n')
+  }
+  
+  cat('Number of observations: ')
+  cat(diseq_summary_obj$N)
+  cat('\n')
+  cat('Log-likelihood: ')
+  cat(diseq_summary_obj$log_likelihood)
+  cat('\n\n')
+}
+
+export_to_csv <- function (diseq_summary_obj, file) {
+  
+  corr <- !is.null(diseq_summary_obj$settings$corr) && diseq_summary_obj$settings$corr == TRUE
+  
+  idx_bd <- diseq_summary_obj$coef_indices[['beta_demand']]
+  idx_bs <- diseq_summary_obj$coef_indices[['beta_supply']]
+  idx_sd <- diseq_summary_obj$coef_indices[['sigma_demand']]
+  idx_ss <- diseq_summary_obj$coef_indices[['sigma_supply']]
+  if (corr) {
+    idx_corr <- diseq_summary_obj$coef_indices[['sigma_corr']]
+  }
+  est_table_demand <- as.data.frame(diseq_summary_obj$coefficients[c(idx_bd, idx_sd), ])
+  est_table_supply <- as.data.frame(diseq_summary_obj$coefficients[c(idx_bs, idx_ss), ])
+  if (corr) {
+    est_table_corr <- as.data.frame(diseq_summary_obj$coefficients[idx_corr, , drop = FALSE])
+  }
+  
+  write(
+    paste('function;', toString(diseq_summary_obj$call[[1]]), ';;;', sep = ''),
+    file = file, append = FALSE
+    )
+  for (arg in names(diseq_summary_obj$call)[-1]) {
+    callstr <- tryCatch(
+      paste(gsub('    ', '', format(diseq_summary_obj$call[[arg]])), collapse = ''),
+      error = function (e) toString(diseq_summary_obj$call[[arg]])
+    )
+    write(
+      paste(arg, ';', callstr, ';;;', sep = ''),
+      file = file, append = TRUE)
+  }
+  
+  write(';;;;', file = file, append = TRUE)
+  write('Demand equation;;;;', file = file, append = TRUE)
+  write(';Estimate;Std. error;t-value;p-value', file = file, append = TRUE)
+  suppressWarnings(
+    write.table(est_table_demand, row.names = TRUE, col.names = FALSE, file = file, append = TRUE, sep=';', na = '')
+    )
+  write(';;;;', file = file, append = TRUE)
+  
+  write('Supply equation;;;;', file = file, append = TRUE)
+  write(';Estimate;Std. error;t-value;p-value', file = file, append = TRUE)
+  suppressWarnings(
+    write.table(est_table_supply, row.names = TRUE, col.names = FALSE, file = file, append = TRUE, sep=';', na = '')
+    )
+  write(';;;;', file = file, append = TRUE)
+  
+  if (corr) {
+    write('Correlation of error terms;;;;', file = file, append = TRUE)
+    write(';Estimate;Std. error;t-value;p-value', file = file, append = TRUE)
+    suppressWarnings(
+      write.table(est_table_corr, row.names = TRUE, col.names = FALSE, file = file, append = TRUE, sep=';', na = '')
+    )
+    write(';;;;', file = file, append = TRUE)
+  }
+  
+  write(paste('Number of observations;', diseq_summary_obj$N, ';;;'), file = file, append = TRUE)
+  write(paste('Log-likelihood;', diseq_summary_obj$log_likelihood, ';;;'), file = file, append = TRUE)
+}
+
+export_all <- function(diseq_obj,
+                       summary_obj = summary(diseq_obj),
+                       folder = stop('A folder is required.')) {
+  dir.create(folder)
+  if (is.null(summary_obj)) {
+    try({
+      summary_obj <- summary(diseq_obj)
+      export_to_csv(summary_obj, file.path(folder, 'summary.csv'))
+    })
+  } else {
+    export_to_csv(summary_obj, file.path(folder, 'summary.csv'))
+  }
+  saveRDS(diseq_obj, file.path(folder, 'model.dem'))
+  return(invisible(diseq_obj))
+}
+
