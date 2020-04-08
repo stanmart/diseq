@@ -143,7 +143,8 @@ fitdiseq <- function(demand_formula = NULL,
                      na.action = na.exclude,
                      random_seed = 1991,
                      elapsed_times = list(),
-                     prev_history = list()
+                     prev_history = list(),
+                     fixed_params = NULL
                      ) {
 
   cl <- match.call()
@@ -154,7 +155,7 @@ fitdiseq <- function(demand_formula = NULL,
   attr(mf, 'demand_terms') <- terms(demand_formula)
   attr(mf, 'supply_terms') <- terms(supply_formula)
   y <- mf[[all.vars(demand_formula[[2]])]]
-  list[X, coef_indices] = model.matrix.diseq(demand_formula, supply_formula, data=mf)
+  list[X, coef_indices] <- model.matrix.diseq(demand_formula, supply_formula, data=mf)
   idx_bd <- coef_indices[['beta_demand']]
   idx_bs <- coef_indices[['beta_supply']]
   idx_sd <- coef_indices[['sigma_demand']]
@@ -206,12 +207,34 @@ fitdiseq <- function(demand_formula = NULL,
     loglike <- function(beta) loglike.diseq.tobit.corr(beta, y, X, idx_bd, idx_bs, idx_sd, idx_ss, idx_corr)
   }
 
+  orig_init <- init
+  orig_lb <- lb
+  orig_ub <- ub
+  orig_initpop <- initpop
+  if (!is.null(fixed_params)) {
+    if (is.null(init)) {
+      stop("An initial vector is required when fixing parameters")
+    }
+    objective_fun <- function(beta_restr) {
+      beta_full <- orig_init
+      beta_full[!fixed_params] <- beta_restr
+      loglike(beta_full)
+    }
+    init <- orig_init[!fixed_params]
+    lb <- orig_lb[!fixed_params]
+    ub <- orig_ub[!fixed_params]
+    if (!is.null(initpop)) {
+      initpop <- orig_initpop[, !fixed_params]
+    }
+  } else {
+    objective_fun <- loglike
+  }
+
   set.seed(random_seed)
 
   if (optimizer == 'SA') {
 
-    list[neg_log_likelihood_opt, beta_opt, history] <-
-      GenSA(init, loglike, lb, ub, control = control)
+    list[neg_log_likelihood_opt, beta_opt, history] <- GenSA(init, objective_fun, lb, ub, control = control)
 
   } else if (optimizer == 'DE') {
 
@@ -230,8 +253,7 @@ fitdiseq <- function(demand_formula = NULL,
       control$NP <- NP
     }
 
-    list[opt, member] <-
-      DEoptim(loglike, lb, ub, control = control)
+    list[opt, member] <- DEoptim(objective_fun, lb, ub, control = control)
     neg_log_likelihood_opt <- opt$bestval
     beta_opt <- opt$bestmem
     history <- list(member$bestvalit, member$bestmemit, member$pop, member$storepop)
@@ -246,7 +268,7 @@ fitdiseq <- function(demand_formula = NULL,
       }
     }
     list[beta_opt, neg_log_likelihood_opt, counts, convergence] <-
-      optim(init, loglike, method = method, control = control)
+      optim(init, objective_fun, method = method, control = control)
     history <- c(counts, convergence)
     names(history) = c(names(counts), 'convergence')
 
@@ -254,6 +276,12 @@ fitdiseq <- function(demand_formula = NULL,
 
     stop('Unknown optimizer. Use one of: SA, DE, optim.')
 
+  }
+
+  if (!is.null(fixed_params)) {
+    beta_opt_restr <- beta_opt
+    beta_opt <- orig_init
+    beta_opt[!fixed_params] <- beta_opt_restr
   }
 
   if (!corr) {
@@ -289,9 +317,10 @@ fitdiseq <- function(demand_formula = NULL,
     'N' = nrow(mf),
     'optim_trace' = c(prev_history, list(history)),
     'settings' = list(
-      'lb' = lb,
-      'ub' = ub,
-      'init' = init,
+      'lb' = orig_lb,
+      'ub' = orig_ub,
+      'init' = orig_init,
+      'initpop' = orig_initpop,
       'optimizer' = optimizer,
       'control' = control,
       'method' = method,
@@ -314,6 +343,7 @@ refitdiseq <- function(diseq_obj,
                        lb = diseq_obj$settings$lb,
                        ub = diseq_obj$settings$ub,
                        init = NULL,
+                       initpop = NULL,
                        corr = diseq_obj$settings$corr,
                        optimizer = diseq_obj$settings$optimizer,
                        control = diseq_obj$settings$control,
@@ -322,18 +352,19 @@ refitdiseq <- function(diseq_obj,
                        random_seed = diseq_obj$random_seed,
                        elapsed_times = NULL,
                        prev_history = NULL,
+                       fixed_params = NULL,
                        continue = TRUE
                        ) {
 
   if (is.null(init)) {
     if (continue) {
+      init <- diseq_obj$coefficients
       if (optimizer == "DE" && !is.null(diseq_obj$optim_trace[[3]])) {
         initpop <- diseq_obj$optim_trace[[3]]
-      } else {
-        init <- diseq_obj$coefficients
-        }
+      }
     } else {
       init <- diseq_obj$settings$init
+      initpop <- diseq_obj$settings$initpop
     }
   }
 
@@ -368,6 +399,7 @@ refitdiseq <- function(diseq_obj,
     lb = lb,
     ub = ub,
     init = init,
+    initpop = initpop,
     corr = corr,
     optimizer = optimizer,
     control = control,
@@ -375,7 +407,8 @@ refitdiseq <- function(diseq_obj,
     na.action = na.action,
     random_seed = random_seed,
     elapsed_times = elapsed_times,
-    prev_history = prev_history
+    prev_history = prev_history,
+    fixed_params = fixed_params
   )
 
 }
