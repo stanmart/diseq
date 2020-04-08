@@ -142,7 +142,8 @@ fitdiseq <- function(demand_formula = NULL,
                      method = 'Nelder-Mead',
                      na.action = na.exclude,
                      random_seed = 1991,
-                     elapsed_times = list()
+                     elapsed_times = list(),
+                     prev_history = list()
                      ) {
 
   cl <- match.call()
@@ -286,7 +287,7 @@ fitdiseq <- function(demand_formula = NULL,
     'log_likelihood' = -neg_log_likelihood_opt,
     'orig_rownames' = rownames(data),
     'N' = nrow(mf),
-    'optim_trace' = history,
+    'optim_trace' = c(prev_history, list(history)),
     'settings' = list(
       'lb' = lb,
       'ub' = ub,
@@ -320,6 +321,7 @@ refitdiseq <- function(diseq_obj,
                        na.action = diseq_obj$na.action,
                        random_seed = diseq_obj$random_seed,
                        elapsed_times = NULL,
+                       prev_history = NULL,
                        continue = TRUE
                        ) {
 
@@ -345,6 +347,16 @@ refitdiseq <- function(diseq_obj,
     }
   }
 
+  if (is.null(prev_history)) {
+    if (continue) {
+      # Append the elapsed times with a new value
+      prev_history <- diseq_obj$optim_trace
+    } else {
+      # Replace the last elapsed time with a new value
+      prev_history <- diseq_obj$optim_trace[-length(diseq_obj$elapsed_times)]
+    }
+  }
+
   if(is.null(corr)) {
     corr <- FALSE
   }
@@ -362,7 +374,8 @@ refitdiseq <- function(diseq_obj,
     method = method,
     na.action = na.action,
     random_seed = random_seed,
-    elapsed_times = elapsed_times
+    elapsed_times = elapsed_times,
+    prev_history = prev_history
   )
 
 }

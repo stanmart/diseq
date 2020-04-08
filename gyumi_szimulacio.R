@@ -1,5 +1,4 @@
-setwd('X:/_workflow/EUFA01')
-source('02_Kódok/Disequilibrium_model/diseq_maxim.R')
+source('diseq_maxim.R')
 library(data.table)
 
 N <- 10000
@@ -22,8 +21,6 @@ dt[, gyumi_kinalat := beta3 * korte + beta4 * szilva + e2]
 
 dt[, gyumi := pmin(gyumi_kereslet, gyumi_kinalat)]
 dt[, gyumi_poz := pmax(0, gyumi)]
-
-dt2 <- fread('X:/_workflow/EUFA01/01_Adatbázisok/04_Disequilibrium_model/gyumi_r.csv')
 
 # Simulated annealing
 t0 <- Sys.time()
@@ -63,15 +60,3 @@ rownames(model_comparison) <- c(rownames(model_comparison)[1 : (nrow(model_compa
 model_comparison <- cbind(model_comparison, (model_comparison[, 'SA'] - model_comparison[, 'DE']) / model_comparison[, 'DE'] * 100)
 colnames(model_comparison) <- c('SA', 'DE', 'Percentage diff.')
 print(model_comparison)
-
-# Fix adatokon
-gyumi_model2 <- fitdiseq(
-  demand_formula = gyumi_poz ~ alma + szilva,
-  supply_formula = gyumi_poz ~ korte + szilva,
-  data = dt2
-)
-print(gyumi_model2)
-
-gyumi_summary2 <- summary(gyumi_model2)
-print(gyumi_summary2)
-
