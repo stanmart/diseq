@@ -177,6 +177,10 @@ fitdiseq <- function(demand_formula = NULL,
     }
   }
 
+  if (length(initpop) == 1 && initpop == FALSE) {
+    # FALSE/NULL should only make a difference when calling refitdiseq
+    initpop <- NULL
+  }
   if (!corr) {
     if (length(lb) != length(idx_bd) + length(idx_bs) + 2 |
         length(ub) != length(idx_bd) + length(idx_bs) + 2) {
@@ -359,11 +363,20 @@ refitdiseq <- function(diseq_obj,
   if (is.null(init)) {
     if (continue) {
       init <- diseq_obj$coefficients
-      if (optimizer == "DE" && !is.null(diseq_obj$optim_trace[[3]])) {
-        initpop <- diseq_obj$optim_trace[[3]]
-      }
     } else {
       init <- diseq_obj$settings$init
+    }
+  }
+
+  if (optimizer == "DE" && is.null(initpop)) {
+    if (continue) {
+      n <- length(diseq_obj$optim_trace)
+      if (length(initpop) == 1 && initpop == FALSE) {
+        initpop <- NULL
+      } else if (!is.null(diseq_obj$optim_trace[[n]][[3]])) {
+        initpop <- initpop <- diseq_obj$optim_trace[[n]][[3]]
+      }
+    } else {
       initpop <- diseq_obj$settings$initpop
     }
   }
