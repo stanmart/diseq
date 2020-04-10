@@ -86,23 +86,23 @@ diseq_model_cens_nocorr_simple_iter %>%
 
 print(summary(diseq_model_cens_nocorr_simple_iter))
 
-optim_trace_cons <- diseq_model_cens_nocorr_bovebb_de$optim_trace[c(1, 3, 5)]
-optim_trace_noncons <- diseq_model_cens_nocorr_bovebb_de$optim_trace[c(1, 3, 5)]
+optim_trace_cons <- diseq_model_cens_nocorr_simple_iter$optim_trace[c(1, 3, 5)]
+optim_trace_noncons <- diseq_model_cens_nocorr_simple_iter$optim_trace[c(1, 3, 5)]
 
-loglik_dt_ind <- diseq_model_cens_nocorr_bovebb_de$optim_trace %>%
+loglik_dt_ind <- diseq_model_cens_nocorr_simple_iter$optim_trace %>%
   lapply(function (trace) as.data.table(trace[[1]])) %>%
   rbindlist()
 loglik_dt_ind[, iter_no := .I]
 ggplot(loglik_dt_ind) + geom_line(aes(x = iter_no, y = V1))
 
-params_dt_ind_cons <- gyumi_model_DE_iter$optim_trace[c(1, 3, 5)] %>%
+params_dt_ind_cons <- optim_trace_cons %>%
   lapply(function (trace) as.data.table(trace[[2]])) %>%
   rbindlist() %>%
   .[, iter_no := .I] %>%
   melt(id.vars = "iter_no")
 ggplot(params_dt_ind_cons) + geom_line(aes(x = iter_no, y = value, color = variable))
 
-params_dt_ind_noncons <- gyumi_model_DE_iter$optim_trace[c(2, 4, 6)] %>%
+params_dt_ind_noncons <- optim_trace_noncons %>%
   lapply(function (trace) as.data.table(trace[[2]])) %>%
   rbindlist() %>%
   .[, iter_no := .I] %>%
