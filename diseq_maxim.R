@@ -192,6 +192,9 @@ fitdiseq <- function(demand_formula = NULL,
     if (!is.null(initpop) && ncol(initpop) != length(idx_bd) + length(idx_bs) + 2) {
       stop('Incorrect size of vectors in the initial population.')
     }
+    if (!is.null(fixed_params) && length(fixed_params) != length(idx_bd) + length(idx_bs) + 2) {
+      stop('Incorrect parameter fixing vector size.')
+    }
   } else {
     if (length(lb) != length(idx_bd) + length(idx_bs) + 3 |
         length(ub) != length(idx_bd) + length(idx_bs) + 3) {
@@ -202,6 +205,9 @@ fitdiseq <- function(demand_formula = NULL,
     }
     if (!is.null(initpop) && ncol(initpop) != length(idx_bd) + length(idx_bs) + 3) {
       stop('Incorrect size of vectors in the initial population.')
+    }
+    if (!is.null(fixed_params) && length(fixed_params) != length(idx_bd) + length(idx_bs) + 3) {
+      stop('Incorrect parameter fixing vector size.')
     }
   }
 
