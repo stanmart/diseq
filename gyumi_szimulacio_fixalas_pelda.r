@@ -3,7 +3,7 @@ library(data.table)
 library(magrittr)
 library(ggplot2)
 
-N <- 2000
+N <- 200
 
 alpha1 <- 0.5
 beta1 <- 1
@@ -35,6 +35,9 @@ gyumi_model_DE <- fitdiseq(
   init = c(0, 0, 0, 0, 0, 0, 0, 0)
 )
 
+optim_cons <- c(0, 1, 1, 0, 1, 1, 1, 1)
+optim_noncons <- c(1, 0, 0, 1, 0, 0, 0, 0)
+
 gyumi_model_DE_iter <- fitdiseq(
   demand_formula = gyumi_poz ~ alma + szilva,
   supply_formula = gyumi_poz ~ korte + szilva,
@@ -42,17 +45,17 @@ gyumi_model_DE_iter <- fitdiseq(
   optimizer = 'DE',
   control = DEoptim.control(trace = 100, itermax = 500),
   init = c(0, 0, 0, 0, 0, 0, 0, 0),
-  fixed_params = c(1, 0, 0, 1, 0, 0, 0, 0)
+  fixed_params = optim_noncons
 ) %>% refitdiseq(
-  fixed_params = c(0, 1, 1, 0, 1, 1, 1, 1),
+  fixed_params = optim_cons,
   continue = TRUE,
   initpop = FALSE
 ) %>% refitdiseq(
-  fixed_params = c(1, 0, 0, 1, 0, 0, 0, 0),
+  fixed_params = optim_noncons,
   continue = TRUE,
   initpop = FALSE
 ) %>% refitdiseq(
-  fixed_params = c(0, 1, 1, 0, 1, 1, 1, 1),
+  fixed_params = optim_cons,
   continue = TRUE,
   initpop = FALSE
 )
@@ -66,6 +69,10 @@ rownames(model_comparison) <- c(rownames(model_comparison)[1 : (nrow(model_compa
 print(model_comparison)
 
 
+coefnames <- names(gyumi_model_DE_iter$coefficients)
+coefnames_cons <- coefnames[!optim_cons]
+coefnames_noncons <- coefnames[!optim_noncons]
+
 loglik_dt_ind <- gyumi_model_DE_iter$optim_trace %>%
   lapply(function (trace) as.data.table(trace[[1]])) %>%
   rbindlist()
@@ -75,6 +82,7 @@ ggplot(loglik_dt_ind) + geom_line(aes(x = iter_no, y = V1))
 params_dt_ind_cons <- gyumi_model_DE_iter$optim_trace[c(2, 4)] %>%
   lapply(function (trace) as.data.table(trace[[2]])) %>%
   rbindlist() %>%
+  setnames(coefnames_cons) %>%
   .[, iter_no := .I] %>%
   melt(id.vars = "iter_no")
 ggplot(params_dt_ind_cons) + geom_line(aes(x = iter_no, y = value, color = variable))
@@ -82,6 +90,7 @@ ggplot(params_dt_ind_cons) + geom_line(aes(x = iter_no, y = value, color = varia
 params_dt_ind_noncons <- gyumi_model_DE_iter$optim_trace[c(1, 3)] %>%
   lapply(function (trace) as.data.table(trace[[2]])) %>%
   rbindlist() %>%
+  setnames(coefnames_noncons) %>%
   .[, iter_no := .I] %>%
   melt(id.vars = "iter_no")
 ggplot(params_dt_ind_noncons) + geom_line(aes(x = iter_no, y = value, color = variable))

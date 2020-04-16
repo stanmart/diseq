@@ -23,7 +23,7 @@ list <- structure(NA, class = "result")
 }
 
 
-loglike.diseq.tobit <- function (beta, y, X, idx_bd, idx_bs, idx_sd, idx_ss) {
+loglike.diseq.tobit <- function (beta, y, X, idx_bd, idx_bs, idx_sd, idx_ss, likelihood_bias = 0) {
   theta1 <- X[, idx_bd] %*% beta[idx_bd]
   theta2 <- X[, idx_bs] %*% beta[idx_bs]
   s1 <- beta[idx_sd]
@@ -35,7 +35,7 @@ loglike.diseq.tobit <- function (beta, y, X, idx_bd, idx_bs, idx_sd, idx_ss) {
   F1 <- 1 - pnorm((y-theta1) / exp(s1))
   F2 <- 1 - pnorm((y-theta2) / exp(s2))
   G <- ifelse(y > 0, f1*F2 + f2*F1, 1 - F1*F2)
-  -sum(log(G))
+  -sum(log(likelihood_bias + G))
 }
 
 
@@ -73,7 +73,7 @@ mvnorm_approx <- function(theta1, sigma1, theta2, sigma2, rho) {
 }
 
 
-loglike.diseq.tobit.corr <- function (beta, y, X, idx_bd, idx_bs, idx_sd, idx_ss, idx_corr) {
+loglike.diseq.tobit.corr <- function (beta, y, X, idx_bd, idx_bs, idx_sd, idx_ss, idx_corr, likelihood_bias = 0) {
   theta1 <- X[, idx_bd] %*% beta[idx_bd]
   theta2 <- X[, idx_bs] %*% beta[idx_bs]
   sigma1 <- beta[idx_sd]
@@ -97,7 +97,7 @@ loglike.diseq.tobit.corr <- function (beta, y, X, idx_bd, idx_bs, idx_sd, idx_ss
     f1*F2 + f2*F1,
     pnorm(0, mean=theta1, sd=sigma1) + pnorm(0, mean=theta2, sd=sigma2) - F_00
   )
-  -sum(log(G))
+  -sum(log(likelihood_bias + G))
   # if (is.na(ret)) {  # kérdés: miért van NaN?
   #   return(Inf)
   # } else {
@@ -144,7 +144,8 @@ fitdiseq <- function(demand_formula = NULL,
                      random_seed = 1991,
                      elapsed_times = list(),
                      prev_history = list(),
-                     fixed_params = NULL
+                     fixed_params = NULL,
+                     likelihood_bias = 0
                      ) {
 
   cl <- match.call()
@@ -212,9 +213,9 @@ fitdiseq <- function(demand_formula = NULL,
   }
 
   if (!corr) {
-    loglike <- function(beta) loglike.diseq.tobit(beta, y, X, idx_bd, idx_bs, idx_sd, idx_ss)
+    loglike <- function(beta) loglike.diseq.tobit(beta, y, X, idx_bd, idx_bs, idx_sd, idx_ss, likelihood_bias)
   } else {
-    loglike <- function(beta) loglike.diseq.tobit.corr(beta, y, X, idx_bd, idx_bs, idx_sd, idx_ss, idx_corr)
+    loglike <- function(beta) loglike.diseq.tobit.corr(beta, y, X, idx_bd, idx_bs, idx_sd, idx_ss, idx_corr, likelihood_bias)
   }
 
   orig_init <- init
@@ -334,7 +335,8 @@ fitdiseq <- function(demand_formula = NULL,
       'optimizer' = optimizer,
       'control' = control,
       'method' = method,
-      'corr' = corr
+      'corr' = corr,
+      'likelihood_bias' = likelihood_bias
     ),
     'na.action' = na.action,
     'random_seed' = random_seed,
@@ -363,6 +365,7 @@ refitdiseq <- function(diseq_obj,
                        elapsed_times = NULL,
                        prev_history = NULL,
                        fixed_params = NULL,
+                       likelihood_bias = diseq_obj$settings$likelihood_bias,
                        continue = TRUE
                        ) {
 
@@ -407,8 +410,12 @@ refitdiseq <- function(diseq_obj,
     }
   }
 
+  # The next two ifs are necessary for backward compatibility reasons
   if(is.null(corr)) {
     corr <- FALSE
+  }
+  if(is.null(likelihood_bias)) {
+    likelihood_bias <- 0
   }
 
   fitdiseq(
@@ -427,7 +434,8 @@ refitdiseq <- function(diseq_obj,
     random_seed = random_seed,
     elapsed_times = elapsed_times,
     prev_history = prev_history,
-    fixed_params = fixed_params
+    fixed_params = fixed_params,
+    likelihood_bias = likelihood_bias
   )
 
 }
