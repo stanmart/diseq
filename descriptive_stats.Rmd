@@ -1,0 +1,157 @@
+---
+title: "Some descriptive statistics"
+author: "Martin Stancsics"
+date: "5/7/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Preliminaries
+
+Loading libraries and data
+```{r}
+library(data.table)
+library(magrittr)
+library(parallel)
+library(ggplot2)
+
+setwd('X:/PSF/_Common/Személyek/BanaiÁdám/Horváth Ákos/panel/diseq_R')
+
+source('02_Kodok/diseq-to_run_v1/diseq_maxim.R')
+
+dt_full <- fread('01_Adatbazisok/01_panel_diseq.csv', integer64 = 'double')
+```
+
+Dummy for relevant firms
+```{r}
+dt_full[, relevant := d12_apply == 1 | d13_apply == 1 | ydis13_newloans > 0]
+dt <- dt_full[relevant == TRUE]
+table(dt$relevant, useNA = "ifany") %>%
+  knitr::kable()
+```
+
+Relevant variables:
+```{r}
+outcome_var <- "ydis13_newloans"
+demand_vars <- c(
+    "x12_age",
+    "x12_size",
+    "x12_trade",
+    "x12_soa",
+    "x12_wcratio",
+    "x12_liqasset",
+    "x12_growtha",
+    "x12_growths",
+    "c12_own"
+)
+supply_vars <- c(
+    "x12_age",
+    "x12_size",
+    "x12_leverage",
+    "x12_negequity",
+    "x12_roa",
+    "x12_tangasset",
+    "l12_arrears",
+    "l12_numprod",
+    "l12_banksince"
+)
+
+all_vars <- union(outcome_var, demand_vars, supply_vars)
+```
+
+# Statistics
+
+## Missing and non-finite values
+
+ - Row: TRUE if nonmissing, FALSE if missing
+ - Column: TRUE if finite, FALSE if infinite
+
+```{r}
+for (varname in all_vars) {
+  cat("\n", varname, ":")
+  print(knitr::kable(table(!is.na(dt[, (varname), with = FALSE][[1]]),
+                           is.finite(dt[, (varname), with = FALSE][[1]]),
+                           useNA = "ifany")))
+}
+```
+
+## Moments and quantiles
+Quantiles:
+```{r}
+quantile_fun <- function(var) {
+  as.data.table(t(quantile(
+    var,
+    probs = c(0, 0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99, 1),
+    na.rm = TRUE
+  )))
+}
+quantile_table <- dt[, (all_vars), with = FALSE] %>% 
+  lapply(quantile_fun) %>% 
+  rbindlist() %>% 
+  .[, var := all_vars] %>% 
+  setcolorder("var")
+knitr::kable(quantile_table)
+```
+
+Moments
+```{r}
+moment_fun <- function(var) {
+  var_mean <- mean(var, na.rm = TRUE)
+  var_sd <- sd(var, na.rm = TRUE)
+  as.data.table(t(c(
+    mean = var_mean,
+    sd = var_sd,
+    skewness = mean(((var - var_mean) / var_sd) ^ 3, na.rm = TRUE)
+  )))
+}
+moment_table <- dt[, (all_vars), with = FALSE] %>% 
+  lapply(moment_fun) %>% 
+  rbindlist() %>% 
+  .[, var := all_vars] %>% 
+  setcolorder("var")
+knitr::kable(moment_table)
+```
+
+Correlations:
+```{r}
+cor(dt[, (all_vars), with = FALSE], use = "pairwise.complete.obs") %>% 
+  knitr::kable()
+```
+
+# Plots
+
+Full range
+```{r}
+for (varname in all_vars) {
+  (ggplot(dt[, (varname), with = FALSE]) +
+    geom_histogram(
+      aes_string(x = varname, y = "stat(density)"),
+      alpha = 0.5,
+      bins = 50,
+      na.rm = TRUE
+    ) +
+    geom_density(aes_string(x = varname), na.rm = TRUE)) %>% 
+    print()
+}
+```
+
+Middle 95%
+```{r}
+for (varname in all_vars) {
+  small_dt <- dt[, (varname), with = FALSE]
+  x_limits <- quantile(small_dt[[1]], probs = c(0.025, 0.975))
+  (ggplot(small_dt[small_dt[[1]] %between% x_limits]) +
+    geom_histogram(
+      aes_string(x = varname, y = "stat(density)"),
+      alpha = 0.5,
+      bins = 50,
+      na.rm = TRUE
+    ) +
+    geom_density(aes_string(x = varname), na.rm = TRUE)) %>% 
+    print()
+}
+```
+
