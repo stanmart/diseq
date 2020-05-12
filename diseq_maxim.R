@@ -26,14 +26,12 @@ list <- structure(NA, class = "result")
 loglike.diseq.tobit <- function (beta, y, X, idx_bd, idx_bs, idx_sd, idx_ss, likelihood_bias = 0) {
   theta1 <- X[, idx_bd] %*% beta[idx_bd]
   theta2 <- X[, idx_bs] %*% beta[idx_bs]
-  s1 <- beta[idx_sd]
-  s2 <- beta[idx_ss]
-  #f1 <- dnorm(y, mean=theta1, sd=s1)
-  f1 <- dnorm(y, mean=theta1, sd=exp(s1))
-  #f2 <- dnorm(y, mean=theta2, sd=s2)
-  f2 <- dnorm(y, mean=theta2, sd=exp(s2))
-  F1 <- 1 - pnorm((y-theta1) / exp(s1))
-  F2 <- 1 - pnorm((y-theta2) / exp(s2))
+  sigma1 <- exp(beta[idx_sd])
+  sigma2 <- exp(beta[idx_ss])
+  f1 <- dnorm(y, mean=theta1, sd=sigma1)
+  f2 <- dnorm(y, mean=theta2, sd=sigma2)
+  F1 <- 1 - pnorm((y-theta1) / sigma1)
+  F2 <- 1 - pnorm((y-theta2) / sigma2)
   G <- ifelse(y > 0, f1*F2 + f2*F1, 1 - F1*F2)
   -sum(log(likelihood_bias + G))
 }
@@ -76,8 +74,8 @@ mvnorm_approx <- function(theta1, sigma1, theta2, sigma2, rho) {
 loglike.diseq.tobit.corr <- function (beta, y, X, idx_bd, idx_bs, idx_sd, idx_ss, idx_corr, likelihood_bias = 0) {
   theta1 <- X[, idx_bd] %*% beta[idx_bd]
   theta2 <- X[, idx_bs] %*% beta[idx_bs]
-  sigma1 <- beta[idx_sd]
-  sigma2 <- beta[idx_ss]
+  sigma1 <- exp(beta[idx_sd])
+  sigma2 <- exp(beta[idx_ss])
   rho <- beta[idx_corr]
 
   # y > 0 eset (F1, F2 feltételes eloszlások) - Maddala & nelson
@@ -127,9 +125,9 @@ model.matrix.diseq <- function (demand_formula, supply_formula, data) {
 }
 
 
-fitdiseq <- function(demand_formula = NULL,
-                     supply_formula = NULL,
-                     data = NULL,
+fitdiseq <- function(demand_formula,
+                     supply_formula,
+                     data,
                      lb = NULL,
                      ub = NULL,
                      init = NULL,
@@ -437,6 +435,100 @@ refitdiseq <- function(diseq_obj,
     fixed_params = fixed_params,
     likelihood_bias = likelihood_bias
   )
+
+}
+
+
+ll_contributions <- function(demand_formula = NULL,
+                             supply_formula = NULL,
+                             data = NULL,
+                             beta = NULL,
+                             corr = FALSE,
+                             na.action = na.exclude,
+                             likelihood_bias = 0
+                             ) {
+
+  mf <- na.action(data[, union(all.vars(demand_formula), all.vars(supply_formula)), with=FALSE])
+  attr(mf, 'demand_terms') <- terms(demand_formula)
+  attr(mf, 'supply_terms') <- terms(supply_formula)
+  y <- mf[[all.vars(demand_formula[[2]])]]
+  list[X, coef_indices] <- model.matrix.diseq(demand_formula, supply_formula, data=mf)
+  idx_bd <- coef_indices[['beta_demand']]
+  idx_bs <- coef_indices[['beta_supply']]
+  idx_sd <- coef_indices[['sigma_demand']]
+  idx_ss <- coef_indices[['sigma_supply']]
+  if (corr) {
+    idx_corr <- coef_indices[['sigma_corr']]
+  }
+
+  y_name <- as.character(demand_formula[[2]])
+  
+  contributions <- as.data.table(X %*% diag(beta[c(idx_bd, idx_bs)]))
+  setnames(contributions, c(paste0('beta * ', colnames(X)[idx_bd], ' - d'),
+                            paste0('beta * ', colnames(X)[idx_bs], ' - s')))
+  contributions[, (y_name) := y]
+
+  theta1 <- X[, idx_bd] %*% beta[idx_bd]
+  theta2 <- X[, idx_bs] %*% beta[idx_bs]
+  sigma1 <- exp(beta[idx_sd])
+  sigma2 <- exp(beta[idx_ss])
+
+  if (!corr) {
+    f1 <- dnorm(y, mean=theta1, sd=sigma1)
+    f2 <- dnorm(y, mean=theta2, sd=sigma2)
+    F1 <- 1 - pnorm((y-theta1) / sigma1)
+    F2 <- 1 - pnorm((y-theta2) / sigma2)
+    prob_zero <- 1 - F1*F2
+    G <- ifelse(y > 0, f1*F2 + f2*F1, prob_zero)
+  } else {
+    f1 <- dnorm(y, mean=theta1, sd=sigma1)
+    f2 <- dnorm(y, mean=theta2, sd=sigma2)
+    F1 <- 1 - pnorm(y,
+                    mean = theta1 + sigma1 / sigma2 * rho * (y - theta2),
+                    sd = sqrt(1 - rho^2) * sigma1)
+    F2 <- 1 - pnorm(y,
+                    mean = theta2 + sigma2 / sigma1 * rho * (y - theta1),
+                    sd = sqrt(1 - rho^2) * sigma2)
+
+    # y < 0 esetre együttes eloszlás közelítése - Mee & Owen 1982
+    F_00 <- mvnorm_approx(theta1, sigma1, theta2, sigma2, rho)
+    prob_zero <- pnorm(0, mean=theta1, sd=sigma1) + pnorm(0, mean=theta2, sd=sigma2) - F_00
+    G <- ifelse(
+      y > 0,
+      f1*F2 + f2*F1,
+      prob_zero
+    )
+  }
+
+  contributions[, pred_demand := theta1]
+  contributions[, pred_supply := theta2]
+  contributions[, pred_outcome := pmin(pred_demand, pred_supply)]
+
+  contributions[, `demand_density (f1)` := f1]
+  contributions[, `supply_density (f2)` := f2]
+  contributions[, `prob_demand_above_observed (F1)` := F1]
+  contributions[, `prob_supply_above_observed (F2)` := F2]
+  contributions[, prob_zero := prob_zero]
+
+  contributions[, likelihood_contribution := G]
+  contributions[, loglike_contribution := log(G)]
+  contributions[, biased_loglike_contribution := log(G + likelihood_bias)]
+
+  return(contributions)
+
+}
+
+
+model_ll_contributions <- function(diseq_obj) {
+
+  ll_contributions(demand_formula = formula(diseq_obj$demand_terms),
+                   supply_formula = formula(diseq_obj$supply_terms),
+                   data = diseq_obj$model,
+                   beta = diseq_obj$coefficients,
+                   corr = diseq_obj$settings$corr,
+                   na.action = diseq_obj$na.action,
+                   likelihood_bias = diseq_obj$settings$likelihood_bias
+                   )
 
 }
 
