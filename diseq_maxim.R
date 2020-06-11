@@ -310,8 +310,15 @@ fitdiseq <- function(demand_formula,
   
   names(beta_opt) <- beta_names
 
+  coefficients <- beta_opt
+  coefficients[idx_sd] <- exp(coefficients[idx_sd])
+  if (!is.null(idx_ss)) {
+    coefficients[idx_ss] <- exp(coefficients[idx_ss])
+  }
+
   diseq_obj <- list(
-    'coefficients' = beta_opt,
+    'coefficients' = coefficients,
+    'raw_coefficients' = beta_opt,
     'coef_indices' = coef_indices,
     'call' = cl,
     'demand_terms' = terms(demand_formula),
@@ -367,7 +374,7 @@ refitdiseq <- function(diseq_obj,
 
   if (is.null(init)) {
     if (continue) {
-      init <- diseq_obj$coefficients
+      init <- diseq_obj$raw_coefficients
     } else {
       init <- diseq_obj$settings$init
     }
@@ -532,7 +539,7 @@ model_ll_contributions <- function(diseq_obj) {
   ll_contributions(demand_formula = formula(diseq_obj$demand_terms),
                    supply_formula = formula(diseq_obj$supply_terms),
                    data = diseq_obj$model,
-                   beta = diseq_obj$coefficients,
+                   beta = diseq_obj$raw_coefficients,
                    corr = corr,
                    equal_sigmas = equal_sigmas,
                    na.action = diseq_obj$na.action,
@@ -550,15 +557,15 @@ print.diseq <- function(diseq_obj) {
 
   cat('Demand equation:\n')
   print(diseq_obj$coefficients[ diseq_obj$coef_indices[['beta_demand']] ])
-  print(exp(diseq_obj$coefficients[ diseq_obj$coef_indices[['sigma_demand']] ]))
+  print(diseq_obj$coefficients[ diseq_obj$coef_indices[['sigma_demand']] ])
   cat('\n')
 
   cat('Supply equation:\n')
   print(diseq_obj$coefficients[ diseq_obj$coef_indices[['beta_supply']] ])
   if (diseq_obj$settings$equal_sigmas) {
-    print(exp(diseq_obj$coefficients[ diseq_obj$coef_indices[['sigma_demand']] ]))
+    print(diseq_obj$coefficients[ diseq_obj$coef_indices[['sigma_demand']] ])
   } else {
-    print(exp(diseq_obj$coefficients[ diseq_obj$coef_indices[['sigma_supply']] ]))
+    print(diseq_obj$coefficients[ diseq_obj$coef_indices[['sigma_supply']] ])
   }
   cat('\n')
 
@@ -611,7 +618,7 @@ predict.diseq <- function(diseq_obj,
   idx_ss <- coef_indices[['sigma_supply']]
   idx_corr <- coef_indices[['sigma_corr']]
   
-  beta_opt <- diseq_obj$coefficients
+  beta_opt <- diseq_obj$raw_coefficients
 
   predicted_demand <- X[, idx_bd] %*% beta_opt[idx_bd]
 
@@ -694,7 +701,7 @@ summary.diseq <- function(diseq_obj) {
   idx_ss <- coef_indices[['sigma_supply']]
   idx_corr <- coef_indices[['sigma_corr']]
 
-  beta_opt <- diseq_obj$coefficients
+  beta_opt <- diseq_obj$raw_coefficients
 
   if (!corr) {
     loglike <- function(beta) loglike.diseq.tobit(beta, y, X, idx_bd, idx_bs, idx_sd, idx_ss)
@@ -704,18 +711,38 @@ summary.diseq <- function(diseq_obj) {
 
   I_opt <- hessian(loglike, beta_opt)
 
-  std_err <- sqrt(diag(solve(I_opt)))
-  t_value <- beta_opt / std_err
+  raw_std_err <- sqrt(diag(solve(I_opt)))
+  raw_t_value <- beta_opt / raw_std_err
+  raw_p_value <- pnorm(-abs(raw_t_value)) * 2
+
+  coefficients <- diseq_obj$coefficients
+  std_err <- raw_std_err
+  std_err[idx_sd] <- std_err[idx_sd] * exp(beta_opt[idx_sd])  # Delta-method
+  if (!is.null(idx_ss)) {
+    std_err[idx_ss] <- std_err[idx_ss] * exp(beta_opt[idx_ss])  # Delta-method
+  }
+  t_value <- coefficients / std_err
   p_value <- pnorm(-abs(t_value)) * 2
 
+  raw_coefficients <- as.matrix(data.frame(
+    'Estimate' = beta_opt,
+    'Std. Error' = raw_std_err,
+    't value' = raw_t_value,
+    'Pr(>[t])' = raw_p_value,
+    row.names = names(beta_opt)
+    ))
+
+  transformed_coefficients <- as.matrix(data.frame(
+    'Estimate' = coefficients,
+    'Std. Error' = std_err,
+    't value' = t_value,
+    'Pr(>[t])' = p_value,
+    row.names = names(coefficients)
+  ))
+
   diseq_summary_obj <- list(
-    'coefficients' = as.matrix(data.frame(
-      'Estimate' = beta_opt,
-      'Std. Error' = std_err,
-      't value' = t_value,
-      'Pr(>[t])' = p_value,
-      row.names = names(beta_opt)
-    )),
+    'raw_coefficients' = raw_coefficients,
+    'coefficients' = transformed_coefficients,
     'call' = diseq_obj$call,
     'demand_terms' = diseq_obj$demand_terms,
     'supply_terms' = diseq_obj$supply_terms,
