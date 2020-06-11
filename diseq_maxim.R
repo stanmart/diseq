@@ -24,8 +24,8 @@ list <- structure(NA, class = "result")
 
 
 loglike.diseq.tobit <- function (beta, y, X, idx_bd, idx_bs, idx_sd, idx_ss, likelihood_bias = 0) {
-  theta1 <- X[, idx_bd] %*% beta[idx_bd]
-  theta2 <- X[, idx_bs] %*% beta[idx_bs]
+  theta1 <- X[, idx_bd, drop = FALSE] %*% beta[idx_bd]
+  theta2 <- X[, idx_bs, drop = FALSE] %*% beta[idx_bs]
   sigma1 <- exp(beta[idx_sd])
   sigma2 <- exp(beta[idx_ss])
   f1 <- dnorm(y, mean=theta1, sd=sigma1)
@@ -72,8 +72,8 @@ mvnorm_approx <- function(theta1, sigma1, theta2, sigma2, rho) {
 
 
 loglike.diseq.tobit.corr <- function (beta, y, X, idx_bd, idx_bs, idx_sd, idx_ss, idx_corr, likelihood_bias = 0) {
-  theta1 <- X[, idx_bd] %*% beta[idx_bd]
-  theta2 <- X[, idx_bs] %*% beta[idx_bs]
+  theta1 <- X[, idx_bd, drop = FALSE] %*% beta[idx_bd]
+  theta2 <- X[, idx_bs, drop = FALSE] %*% beta[idx_bs]
   sigma1 <- exp(beta[idx_sd])
   sigma2 <- exp(beta[idx_ss])
   rho <- beta[idx_corr]
