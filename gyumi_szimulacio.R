@@ -29,6 +29,8 @@ gyumi_model_SA <- fitdiseq(
   supply_formula = gyumi_poz ~ korte + szilva,
   data = dt,
   optimizer = 'SA',
+  lb = c(-5, -5, -5, -5, -5, -5, -5, -5),
+  ub = c(5, 5, 5, 5, 5, 5, 5, 5)
 )
 running_time_SA <- difftime(Sys.time(), t0, units = 'min')
 print(gyumi_model_SA)
@@ -43,6 +45,8 @@ gyumi_model_DE <- fitdiseq(
   supply_formula = gyumi_poz ~ korte + szilva,
   data = dt,
   optimizer = 'DE',
+  lb = c(-5, -5, -5, -5, -5, -5, -5, -5),
+  ub = c(5, 5, 5, 5, 5, 5, 5, 5),
   control = DEoptim.control(trace = 100, itermax = 5000)
 )
 running_time_DE <- difftime(Sys.time(), t0, units = 'min')

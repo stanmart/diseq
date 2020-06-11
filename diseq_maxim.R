@@ -27,7 +27,12 @@ loglike.diseq.tobit <- function (beta, y, X, idx_bd, idx_bs, idx_sd, idx_ss, lik
   theta1 <- X[, idx_bd, drop = FALSE] %*% beta[idx_bd]
   theta2 <- X[, idx_bs, drop = FALSE] %*% beta[idx_bs]
   sigma1 <- exp(beta[idx_sd])
-  sigma2 <- exp(beta[idx_ss])
+  if (is.null(idx_ss)) {
+    # when the sigmas are fixed to be equal
+    sigma2 <- sigma1
+  } else {
+    sigma2 <- exp(beta[idx_ss])
+  }
   f1 <- dnorm(y, mean=theta1, sd=sigma1)
   f2 <- dnorm(y, mean=theta2, sd=sigma2)
   F1 <- 1 - pnorm((y-theta1) / sigma1)
@@ -75,10 +80,15 @@ loglike.diseq.tobit.corr <- function (beta, y, X, idx_bd, idx_bs, idx_sd, idx_ss
   theta1 <- X[, idx_bd, drop = FALSE] %*% beta[idx_bd]
   theta2 <- X[, idx_bs, drop = FALSE] %*% beta[idx_bs]
   sigma1 <- exp(beta[idx_sd])
-  sigma2 <- exp(beta[idx_ss])
+  if (is.null(idx_ss)) {
+    # when the sigmas are fixed to be equal
+    sigma2 <- sigma1
+  } else {
+    sigma2 <- exp(beta[idx_ss])
+  }
   rho <- beta[idx_corr]
 
-  # y > 0 eset (F1, F2 feltételes eloszlások) - Maddala & nelson
+  # y > 0 eset (F1, F2 feltételes eloszlások) - Maddala & Nelson
   f1 <- dnorm(y, mean=theta1, sd=sigma1)
   f2 <- dnorm(y, mean=theta2, sd=sigma2)
   F1 <- 1 - pnorm(y,
@@ -96,7 +106,7 @@ loglike.diseq.tobit.corr <- function (beta, y, X, idx_bd, idx_bs, idx_sd, idx_ss
     pnorm(0, mean=theta1, sd=sigma1) + pnorm(0, mean=theta2, sd=sigma2) - F_00
   )
   -sum(log(likelihood_bias + G))
-  # if (is.na(ret)) {  # kérdés: miért van NaN?
+  # if (is.na(ret)) {
   #   return(Inf)
   # } else {
   #   return(ret)
@@ -108,7 +118,7 @@ loglike.diseq.tobit.corr <- function (beta, y, X, idx_bd, idx_bs, idx_sd, idx_ss
 }
 
 
-model.matrix.diseq <- function (demand_formula, supply_formula, data) {
+model.matrix.diseq <- function (demand_formula, supply_formula, data, corr=FALSE, equal_sigmas=FALSE) {
   X_d <- model.matrix(formula(demand_formula), data = data)
   X_s <- model.matrix(formula(supply_formula), data = data)
   rows <- intersect(rownames(X_d), rownames(X_s))
@@ -118,9 +128,10 @@ model.matrix.diseq <- function (demand_formula, supply_formula, data) {
     'beta_demand' = 1 : n_d,
     'beta_supply' = (n_d+1) : (n_d+n_s),
     'sigma_demand' = n_d+n_s+1,
-    'sigma_supply' = n_d+n_s+2,
-    'sigma_corr' = n_d+n_s+3
+    'sigma_supply' = if (equal_sigmas) {NULL} else {n_d+n_s+2},
+    'sigma_corr' = if (!corr) {NULL} else if (equal_sigmas) {n_d+n_s+2} else {n_d+n_s+3}
   )
+  # Unavailable indices are NULL
   list(cbind(X_d[rows, ], X_s[rows, ]), coef_indices)
 }
 
@@ -132,6 +143,7 @@ fitdiseq <- function(demand_formula,
                      ub = NULL,
                      init = NULL,
                      initpop = NULL,
+                     equal_sigmas = FALSE,
                      corr = FALSE,
                      optimizer = 'SA',
                      control = (if (optimizer == 'SA') {list('verbose' = TRUE, 'max.time' = 1200)}
@@ -147,67 +159,51 @@ fitdiseq <- function(demand_formula,
                      ) {
 
   cl <- match.call()
-  t0 <- Sys.time()
-  cat(paste('Starting estimation at', t0, '\n'))
 
   mf <- na.action(data[, union(all.vars(demand_formula), all.vars(supply_formula)), with=FALSE])
   attr(mf, 'demand_terms') <- terms(demand_formula)
   attr(mf, 'supply_terms') <- terms(supply_formula)
   y <- mf[[all.vars(demand_formula[[2]])]]
-  list[X, coef_indices] <- model.matrix.diseq(demand_formula, supply_formula, data=mf)
+  list[X, coef_indices] <- model.matrix.diseq(demand_formula, supply_formula, data=mf,
+                                              corr=corr, equal_sigmas=equal_sigmas)
   idx_bd <- coef_indices[['beta_demand']]
   idx_bs <- coef_indices[['beta_supply']]
   idx_sd <- coef_indices[['sigma_demand']]
-  idx_ss <- coef_indices[['sigma_supply']]
+  idx_ss <- coef_indices[['sigma_supply']]  # A NULL here automatically signals loglike to use sigma1 for sigma2
+  idx_corr <- coef_indices[['sigma_corr']]
+
+  num_of_params <- length(idx_bd) + length(idx_bs)
+  if (equal_sigmas) {
+    num_of_params <- num_of_params + 1
+  } else {
+     num_of_params <- num_of_params + 2
+  }
   if (corr) {
-    idx_corr <- coef_indices[['sigma_corr']]
+    num_of_params <- num_of_params + 1
   }
 
-  if (is.null(lb)) {
-    lb <- c(rep(-10, length(idx_bd) + length(idx_bs)), -5, -5)
-    if (corr) {
-      lb <- c(lb, -1)
-    }
-  }
-  if (is.null(ub)) {
-    ub <- c(rep(10, length(idx_bd) + length(idx_bs) + 2))
-    if (corr) {
-      ub <- c(ub, 1)
-    }
-  }
+  # Note: no automatic bounds will be created if not provided explicitely in the function call.
+  # If the optimizer needs them, let it throw an exception.
 
   if (length(initpop) == 1 && initpop == FALSE) {
     # FALSE/NULL should only make a difference when calling refitdiseq
     initpop <- NULL
   }
-  if (!corr) {
-    if (length(lb) != length(idx_bd) + length(idx_bs) + 2 |
-        length(ub) != length(idx_bd) + length(idx_bs) + 2) {
-      stop('Incorrect bound size.')
-    }
-    if (!is.null(init) && length(init) != length(idx_bd) + length(idx_bs) + 2) {
-      stop('Incorrect initial vector size.')
-    }
-    if (!is.null(initpop) && ncol(initpop) != length(idx_bd) + length(idx_bs) + 2) {
-      stop('Incorrect size of vectors in the initial population.')
-    }
-    if (!is.null(fixed_params) && length(fixed_params) != length(idx_bd) + length(idx_bs) + 2) {
-      stop('Incorrect parameter fixing vector size.')
-    }
-  } else {
-    if (length(lb) != length(idx_bd) + length(idx_bs) + 3 |
-        length(ub) != length(idx_bd) + length(idx_bs) + 3) {
-      stop('Incorrect bound size.')
-    }
-    if (!is.null(init) && length(init) != length(idx_bd) + length(idx_bs) + 3) {
-      stop('Incorrect initial vector size.')
-    }
-    if (!is.null(initpop) && ncol(initpop) != length(idx_bd) + length(idx_bs) + 3) {
-      stop('Incorrect size of vectors in the initial population.')
-    }
-    if (!is.null(fixed_params) && length(fixed_params) != length(idx_bd) + length(idx_bs) + 3) {
-      stop('Incorrect parameter fixing vector size.')
-    }
+
+  if (!is.null(lb) && length(lb) != num_of_params) {
+    stop("Incorrect lower bound size")
+  }
+  if (!is.null(ub) && length(ub) != num_of_params) {
+    stop("Incorrect upper bound size")
+  }
+  if (!is.null(init) && length(init) != num_of_params) {
+    stop("Incorrect initial vector size")
+  }
+  if (!is.null(initpop) && ncol(initpop) != num_of_params) {
+    stop('Incorrect size of vectors in the initial population.')
+  }
+  if (!is.null(fixed_params) && length(fixed_params) != num_of_params) {
+    stop('Incorrect parameter fixing vector size.')
   }
 
   if (!corr) {
@@ -229,6 +225,7 @@ fitdiseq <- function(demand_formula,
       beta_full[!fixed_params] <- beta_restr
       loglike(beta_full)
     }
+    # NULL indexed by anything is still NULL, so no change needed here
     init <- orig_init[!fixed_params]
     lb <- orig_lb[!fixed_params]
     ub <- orig_ub[!fixed_params]
@@ -240,6 +237,9 @@ fitdiseq <- function(demand_formula,
   }
 
   set.seed(random_seed)
+  
+  t0 <- Sys.time()
+  cat(paste('Starting estimation at', t0, '\n'))
 
   if (optimizer == 'SA') {
 
@@ -270,11 +270,9 @@ fitdiseq <- function(demand_formula,
   } else if (optimizer == 'optim') {
 
     if (is.null(init)) {
-      if (!corr) {
-        init <- c(rep(0, length(idx_bd) + length(idx_bs)), 1, 1)
-      } else {
-        init <- c(rep(0, length(idx_bd) + length(idx_bs)), 1, 1, 0)
-      }
+      cat("No initial vector provided. Using all zeros as the starting point.")
+      init <- rep(0, num_of_params)
+      # Therefore the starting point for sigmas is exp(0) = 1
     }
     list[beta_opt, neg_log_likelihood_opt, counts, convergence] <-
       optim(init, objective_fun, method = method, control = control)
@@ -286,6 +284,10 @@ fitdiseq <- function(demand_formula,
     stop('Unknown optimizer. Use one of: SA, DE, optim.')
 
   }
+  
+  t1 <- Sys.time()
+  cat(paste('Estimation finished at', t1, '\n'))
+  t_delta = difftime(t1, t0)
 
   if (!is.null(fixed_params)) {
     beta_opt_restr <- beta_opt
@@ -293,26 +295,20 @@ fitdiseq <- function(demand_formula,
     beta_opt[!fixed_params] <- beta_opt_restr
   }
 
-  if (!corr) {
-    names(beta_opt) <- c(
-      paste0(colnames(X)[idx_bd], ' - d'),
-      paste0(colnames(X)[idx_bs], ' - s'),
-      'sigma_demand',
-      'sigma_supply'
-    )
+  beta_names <- c(
+    paste0(colnames(X)[idx_bd], ' - d'),
+    paste0(colnames(X)[idx_bs], ' - s')
+  )
+  if (equal_sigmas) {
+    beta_names <- c(beta_names, 'sigma')
   } else {
-    names(beta_opt) <- c(
-      paste0(colnames(X)[idx_bd], ' - d'),
-      paste0(colnames(X)[idx_bs], ' - s'),
-      'sigma_demand',
-      'sigma_supply',
-      'rho'
-    )
+    beta_names <- c(beta_names, 'sigma_demand', 'sigma_supply')
   }
-
-  t1 <- Sys.time()
-  cat(paste('Estimation finished at', t1, '\n'))
-  t_delta = difftime(t1, t0)
+  if (corr) {
+    beta_names <- c(beta_names, 'rho')
+  }
+  
+  names(beta_opt) <- beta_names
 
   diseq_obj <- list(
     'coefficients' = beta_opt,
@@ -334,6 +330,7 @@ fitdiseq <- function(demand_formula,
       'control' = control,
       'method' = method,
       'corr' = corr,
+      'equal_sigmas' = equal_sigmas,
       'likelihood_bias' = likelihood_bias
     ),
     'na.action' = na.action,
@@ -355,6 +352,7 @@ refitdiseq <- function(diseq_obj,
                        init = NULL,
                        initpop = NULL,
                        corr = diseq_obj$settings$corr,
+                       equal_sigmas = diseq_obj$settings$equal_sigmas,
                        optimizer = diseq_obj$settings$optimizer,
                        control = diseq_obj$settings$control,
                        method = diseq_obj$settings$method,
@@ -400,17 +398,20 @@ refitdiseq <- function(diseq_obj,
 
   if (is.null(prev_history)) {
     if (continue) {
-      # Append the elapsed times with a new value
+      # Append the history with a new value
       prev_history <- diseq_obj$optim_trace
     } else {
-      # Replace the last elapsed time with a new value
+      # Replace the last step of the history with a new value
       prev_history <- diseq_obj$optim_trace[-length(diseq_obj$elapsed_times)]
     }
   }
 
-  # The next two ifs are necessary for backward compatibility reasons
+  # The next three ifs are necessary for backward compatibility reasons
   if(is.null(corr)) {
     corr <- FALSE
+  }
+  if (is.null(equal_sigmas)) {
+    equal_sigmas <- FALSE
   }
   if(is.null(likelihood_bias)) {
     likelihood_bias <- 0
@@ -425,6 +426,7 @@ refitdiseq <- function(diseq_obj,
     init = init,
     initpop = initpop,
     corr = corr,
+    equal_sigmas = equal_sigmas,
     optimizer = optimizer,
     control = control,
     method = method,
@@ -443,8 +445,8 @@ ll_contributions <- function(demand_formula = NULL,
                              supply_formula = NULL,
                              data = NULL,
                              beta = NULL,
+                             equal_sigmas = FALSE,                             na.action = na.exclude,
                              corr = FALSE,
-                             na.action = na.exclude,
                              likelihood_bias = 0
                              ) {
 
@@ -452,14 +454,13 @@ ll_contributions <- function(demand_formula = NULL,
   attr(mf, 'demand_terms') <- terms(demand_formula)
   attr(mf, 'supply_terms') <- terms(supply_formula)
   y <- mf[[all.vars(demand_formula[[2]])]]
-  list[X, coef_indices] <- model.matrix.diseq(demand_formula, supply_formula, data=mf)
+  list[X, coef_indices] <- model.matrix.diseq(demand_formula, supply_formula, data=mf,
+                                              corr=corr, equal_sigmas=equal_sigmas)
   idx_bd <- coef_indices[['beta_demand']]
   idx_bs <- coef_indices[['beta_supply']]
   idx_sd <- coef_indices[['sigma_demand']]
   idx_ss <- coef_indices[['sigma_supply']]
-  if (corr) {
-    idx_corr <- coef_indices[['sigma_corr']]
-  }
+  idx_corr <- coef_indices[['sigma_corr']]
 
   y_name <- as.character(demand_formula[[2]])
   
@@ -471,7 +472,11 @@ ll_contributions <- function(demand_formula = NULL,
   theta1 <- X[, idx_bd] %*% beta[idx_bd]
   theta2 <- X[, idx_bs] %*% beta[idx_bs]
   sigma1 <- exp(beta[idx_sd])
-  sigma2 <- exp(beta[idx_ss])
+  if (is.null(idx_ss)) {
+    sigma2 <- sigma1
+  } else {
+    sigma2 <- exp(beta[idx_ss])
+  }
 
   if (!corr) {
     f1 <- dnorm(y, mean=theta1, sd=sigma1)
@@ -521,11 +526,15 @@ ll_contributions <- function(demand_formula = NULL,
 
 model_ll_contributions <- function(diseq_obj) {
 
+  corr <- !is.null(diseq_obj$settings$corr) && diseq_obj$settings$corr == TRUE
+  equal_sigmas <- !is.null(diseq_obj$settings$equal_sigmas) && diseq_obj$settings$equal_sigmas == TRUE
+
   ll_contributions(demand_formula = formula(diseq_obj$demand_terms),
                    supply_formula = formula(diseq_obj$supply_terms),
                    data = diseq_obj$model,
                    beta = diseq_obj$coefficients,
-                   corr = diseq_obj$settings$corr,
+                   corr = corr,
+                   equal_sigmas = equal_sigmas,
                    na.action = diseq_obj$na.action,
                    likelihood_bias = diseq_obj$settings$likelihood_bias
                    )
@@ -541,12 +550,16 @@ print.diseq <- function(diseq_obj) {
 
   cat('Demand equation:\n')
   print(diseq_obj$coefficients[ diseq_obj$coef_indices[['beta_demand']] ])
-  print(diseq_obj$coefficients[ diseq_obj$coef_indices[['sigma_demand']] ])
+  print(exp(diseq_obj$coefficients[ diseq_obj$coef_indices[['sigma_demand']] ]))
   cat('\n')
 
   cat('Supply equation:\n')
   print(diseq_obj$coefficients[ diseq_obj$coef_indices[['beta_supply']] ])
-  print(diseq_obj$coefficients[ diseq_obj$coef_indices[['sigma_supply']] ])
+  if (diseq_obj$settings$equal_sigmas) {
+    print(exp(diseq_obj$coefficients[ diseq_obj$coef_indices[['sigma_demand']] ]))
+  } else {
+    print(exp(diseq_obj$coefficients[ diseq_obj$coef_indices[['sigma_supply']] ]))
+  }
   cat('\n')
 
   if (!is.null(diseq_obj$settings$corr) && diseq_obj$settings$corr) {
@@ -566,12 +579,16 @@ predict.diseq <- function(diseq_obj,
                           exact = TRUE) {
 
   corr <- !is.null(diseq_obj$settings$corr) && diseq_obj$settings$corr == TRUE
+  equal_sigmas <- !is.null(diseq_obj$settings$equal_sigmas) && diseq_obj$settings$equal_sigmas == TRUE
 
   if (is.null(newdata)) {
     list[X, coef_indices] = model.matrix.diseq(
       diseq_obj$demand_terms,
       diseq_obj$supply_terms,
-      data = diseq_obj$model)
+      data = diseq_obj$model,
+      corr = corr,
+      equal_sigmas = equal_sigmas
+    )
     orig_rownames <- diseq_obj$orig_rownames
   } else {
     list[X, coef_indices] = model.matrix.diseq(
@@ -580,7 +597,9 @@ predict.diseq <- function(diseq_obj,
       data = na.action(newdata[, union(all.vars(update(diseq_obj$demand_terms, NULL ~ .)),
                                        all.vars(update(diseq_obj$supply_terms, NULL ~ .))
                                        ),
-                               with=FALSE])
+                               with=FALSE]),
+      corr = corr,
+      equal_sigmas = equal_sigmas
       )
     orig_rownames <- rownames(newdata)
   }
@@ -590,23 +609,29 @@ predict.diseq <- function(diseq_obj,
   idx_bs <- coef_indices[['beta_supply']]
   idx_sd <- coef_indices[['sigma_demand']]
   idx_ss <- coef_indices[['sigma_supply']]
-  if (!corr) {
-    idx_corr <- coef_indices[['sigma_corr']]
-  }
+  idx_corr <- coef_indices[['sigma_corr']]
+  
   beta_opt <- diseq_obj$coefficients
 
   predicted_demand <- X[, idx_bd] %*% beta_opt[idx_bd]
-  predicted_supply <- X[, idx_bs] %*% beta_opt[idx_bs]
+
+  sigma1 <- exp(beta_opt[idx_sd])
+  if (is.null(idx_ss)) {
+    sigma2 <- sigma1
+  } else {
+    sigma2 <- exp(beta_opt[idx_ss])
+  }
+  if (is.null(idx_corr)) {
+    rho <- 0
+  } else {
+    rho <- beta_opt[idx_corr]
+  }
 
   if (type == 'prob_supply_constrained') {
 
     if (prob_without_positive_demand == TRUE) {
 
-      if (!corr) {
-        sigma <- sqrt(beta_opt[idx_sd]^2 + beta_opt[idx_ss]^2)
-      } else {
-        sigma <- sqrt(beta_opt[idx_sd]^2 + beta_opt[idx_ss]^2 - 2*beta_opt[idx_corr]*beta_opt[idx_sd]*beta_opt[idx_ss])
-      }
+      sigma <- sqrt(sigma1^2 + sigma2^2 - 2 * corr * sigma1 * sigma2)
       prob_supply_constrained <- pnorm((predicted_demand-predicted_supply) / sigma)
 
     } else {
@@ -615,18 +640,13 @@ predict.diseq <- function(diseq_obj,
 
       # A P(D > S metszet D > 0) = P(S - D < 0 metszet -D < 0) együttes eloszlása
       # levezetés papíron Peti mappájában (térkép!)
-      if (corr) {
-        corr_coef_ds <- beta_opt[idx_corr]
-      } else {
-        corr_coef_ds <- 0
-      }
       mu_1 <- predicted_supply - predicted_demand
       mu_2 <- -predicted_demand
-      sigma_1 <- sqrt(beta_opt[idx_sd]^2 + beta_opt[idx_ss]^2 - 2*corr_coef_ds*beta_opt[idx_sd]*beta_opt[idx_ss])
-      sigma_2 <- beta_opt[idx_sd]
-      corr_coef <- beta_opt[idx_sd] / beta_opt[idx_ss] - corr_coef_ds
+      sigma_1_bar <- sqrt(sigma1^2 + sigma2^2 - 2 * rho * sigma1 * sigma2)
+      sigma_2_bar <- sigma2
+      corr_coef <- sigma1 / sigma2 - rho
 
-      prob_supply_constrained <- mvnorm_fun(mu_1, sigma_1, mu_2, sigma_2, corr_coef)
+      prob_supply_constrained <- mvnorm_fun(mu_1, sigma_1_bar, mu_2, sigma_2_bar, corr_coef)
 
     }
 
@@ -658,20 +678,22 @@ predict.diseq <- function(diseq_obj,
 summary.diseq <- function(diseq_obj) {
 
   corr <- !is.null(diseq_obj$settings$corr) && diseq_obj$settings$corr == TRUE
+  equal_sigmas <- !is.null(diseq_obj$settings$equal_sigmas) && diseq_obj$settings$equal_sigmas == TRUE
 
   y <- diseq_obj$model[[all.vars(formula(diseq_obj$demand_terms)[[2]])]]
   list[X, coef_indices] = model.matrix.diseq(
     diseq_obj$demand_terms,
     diseq_obj$supply_terms,
-    data = diseq_obj$model
+    data = diseq_obj$model,
+    corr = corr,
+    equal_sigmas = equal_sigmas
   )
   idx_bd <- coef_indices[['beta_demand']]
   idx_bs <- coef_indices[['beta_supply']]
   idx_sd <- coef_indices[['sigma_demand']]
   idx_ss <- coef_indices[['sigma_supply']]
-  if (corr) {
-    idx_corr <- coef_indices[['sigma_corr']]
-  }
+  idx_corr <- coef_indices[['sigma_corr']]
+
   beta_opt <- diseq_obj$coefficients
 
   if (!corr) {
@@ -698,6 +720,7 @@ summary.diseq <- function(diseq_obj) {
     'demand_terms' = diseq_obj$demand_terms,
     'supply_terms' = diseq_obj$supply_terms,
     'corr' = corr,
+    'equal_sigmas' = equal_sigmas,
     'coef_indices' = diseq_obj$coef_indices,
     'log_likelihood' = diseq_obj$log_likelihood,
     'N' = diseq_obj$N,
@@ -719,8 +742,12 @@ print.summary.diseq <- function(diseq_summary_obj) {
   idx_bs <- diseq_summary_obj$coef_indices[['beta_supply']]
   idx_sd <- diseq_summary_obj$coef_indices[['sigma_demand']]
   idx_ss <- diseq_summary_obj$coef_indices[['sigma_supply']]
-  if (corr) {
-    idx_corr <- diseq_summary_obj$coef_indices[['sigma_corr']]
+  idx_corr <- diseq_summary_obj$coef_indices[['sigma_corr']]
+
+
+  # Not very nice but works for the purposes of this function
+  if (is.null(idx_ss)) {
+    idx_ss <- idx_sd
   }
 
   est_table_demand <- as.data.frame(diseq_summary_obj$coefficients[c(idx_bd, idx_sd), ])
@@ -764,9 +791,13 @@ export_to_csv <- function (diseq_summary_obj, file) {
   idx_bs <- diseq_summary_obj$coef_indices[['beta_supply']]
   idx_sd <- diseq_summary_obj$coef_indices[['sigma_demand']]
   idx_ss <- diseq_summary_obj$coef_indices[['sigma_supply']]
-  if (corr) {
-    idx_corr <- diseq_summary_obj$coef_indices[['sigma_corr']]
+  idx_corr <- diseq_summary_obj$coef_indices[['sigma_corr']]
+
+  # Not very nice but works for the purposes of this function
+  if (is.null(idx_ss)) {
+    idx_ss <- idx_sd
   }
+
   est_table_demand <- as.data.frame(diseq_summary_obj$coefficients[c(idx_bd, idx_sd), ])
   est_table_supply <- as.data.frame(diseq_summary_obj$coefficients[c(idx_bs, idx_ss), ])
   if (corr) {
