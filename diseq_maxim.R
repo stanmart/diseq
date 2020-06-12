@@ -682,7 +682,59 @@ predict.diseq <- function(diseq_obj,
 }
 
 
-summary.diseq <- function(diseq_obj) {
+score.diseq.tobit <- function(beta, y, X, idx_bd, idx_bs, idx_sd, idx_ss) {
+  theta1 <-X[, idx_bd, drop = FALSE] %*% beta[idx_bd]
+  theta2 <-X[, idx_bs, drop = FALSE] %*% beta[idx_bs]
+  sigma1 <- exp(beta[idx_sd])
+  if (is.null(idx_ss)) {
+    sigma2 <- sigma1 
+  } else {
+    sigma2 <- exp(beta[idx_ss])
+  }
+
+  f1 <- dnorm(y, mean=theta1, sd=sigma1)
+  f2 <- dnorm(y, mean=theta2, sd=sigma2)
+  F1 <- 1 - pnorm((y-theta1) / sigma1)
+  F2 <- 1 - pnorm((y-theta2) / sigma2)
+  G <- ifelse(y > 0, f1*F2 + f2*F1, 1 - F1*F2)
+  h1 <- (y - theta1) / sigma1
+  h2 <- (y - theta2) / sigma2
+  
+  g_bd <- ifelse(y > 0,
+                 (f1*h1*F2/sigma1 + f1*f2) / G,
+                 -(f1*F2) / G
+                 )
+  g_bs <- ifelse(y > 0,
+                 (f2*h2*F1/sigma2 + f1*f2) / G,
+                 -(f2*F1) / G
+                 )
+  g_sd <- ifelse(y > 0,
+                 (f1*F2*(h1^2-1) / (2*sigma1^2) + f1*f2*h1 / (2*sigma1)) / G,
+                 -(f1*h1*F2 / (2*sigma1)) / G
+                 )
+  g_ss <- ifelse(y > 0,
+                 (f2*F1*(h2^2-1) / (2*sigma2^2) + f1*f2*h2 / (2*sigma2)) / G,
+                 -(f2*h2*F1 / (2*sigma2)) / G
+                 )
+  
+  if (is.null(idx_ss)) {
+    return(cbind(
+      X[, idx_bd, drop = FALSE] * g_bd,  # Chain rule for betas
+      X[, idx_bs, drop = FALSE] * g_bs,  # and using the fact that vectors are replicated columnwise
+      (g_sd + g_ss) * 2 * sigma1 ^2  # Chain rule for sigma
+    ))
+  } else {
+    return(cbind(
+      X[, idx_bd, drop = FALSE] * g_bd,  # Chain rule for the betas
+      X[, idx_bs, drop = FALSE] * g_bs,  # and using the fact that vectors are replicated columnwise
+      g_sd * 2 * sigma1 ^2,  # Chain rule for the sigmas
+      g_ss * 2 * sigma2 ^2
+    ))
+  }
+}
+
+
+summary.diseq <- function(diseq_obj, se_type = "IM") {
 
   corr <- !is.null(diseq_obj$settings$corr) && diseq_obj$settings$corr == TRUE
   equal_sigmas <- !is.null(diseq_obj$settings$equal_sigmas) && diseq_obj$settings$equal_sigmas == TRUE
@@ -709,9 +761,24 @@ summary.diseq <- function(diseq_obj) {
     loglike <- function(beta) loglike.diseq.tobit.corr(beta, y, X, idx_bd, idx_bs, idx_sd, idx_ss, idx_corr)
   }
 
-  I_opt <- hessian(loglike, beta_opt)
+  if (se_type == "IM") {
+    I_opt <- hessian(loglike, beta_opt)
+    raw_std_err <- sqrt(diag(solve(I_opt)))
+  } else if (se_type == "score") {
+    if (corr) stop ("To be implemented in the correlated case")
+    scores <- score.diseq.tobit(beta_opt, y, X, idx_bd, idx_bs, idx_sd, idx_ss)
+    raw_std_err <- sqrt(diag(solve(t(scores) %*% scores)))
+  } else if (se_type == "robust") {
+    if (corr) stop ("To be implemented in the correlated case")
+    I_opt <- hessian(loglike, beta_opt)
+    scores <- score.diseq.tobit(beta_opt, y, X, idx_bd, idx_bs, idx_sd, idx_ss)
+    raw_std_err <- sqrt(diag(solve(I_opt) %*% (t(scores) %*% scores) %*% solve(I_opt)))
+  } else {
+    stop("Unknown standard error type. Must be one of: 'IM', 'score', 'robust'")
+  }
 
-  raw_std_err <- sqrt(diag(solve(I_opt)))
+
+
   raw_t_value <- beta_opt / raw_std_err
   raw_p_value <- pnorm(-abs(raw_t_value)) * 2
 
