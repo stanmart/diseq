@@ -86,7 +86,7 @@ loglike.diseq.tobit.corr <- function (beta, y, X, idx_bd, idx_bs, idx_sd, idx_ss
   } else {
     sigma2 <- exp(beta[idx_ss])
   }
-  rho <- beta[idx_corr]
+  rho <- tanh(beta[idx_corr])
 
   # y > 0 eset (F1, F2 feltételes eloszlások) - Maddala & Nelson
   f1 <- dnorm(y, mean=theta1, sd=sigma1)
@@ -315,6 +315,9 @@ fitdiseq <- function(demand_formula,
   if (!is.null(idx_ss)) {
     coefficients[idx_ss] <- exp(coefficients[idx_ss])
   }
+  if (corr) {
+    coefficients[idx_corr] <- tanh(coefficients[idx_corr])
+  }
 
   diseq_obj <- list(
     'coefficients' = coefficients,
@@ -452,7 +455,8 @@ ll_contributions <- function(demand_formula = NULL,
                              supply_formula = NULL,
                              data = NULL,
                              beta = NULL,
-                             equal_sigmas = FALSE,                             na.action = na.exclude,
+                             equal_sigmas = FALSE,                             
+                             na.action = na.exclude,
                              corr = FALSE,
                              likelihood_bias = 0
                              ) {
@@ -483,6 +487,10 @@ ll_contributions <- function(demand_formula = NULL,
     sigma2 <- sigma1
   } else {
     sigma2 <- exp(beta[idx_ss])
+  }
+  
+  if (corr) {
+    rho <- tanh(beta[idx_corr])
   }
 
   if (!corr) {
@@ -631,14 +639,14 @@ predict.diseq <- function(diseq_obj,
   if (is.null(idx_corr)) {
     rho <- 0
   } else {
-    rho <- beta_opt[idx_corr]
+    rho <- tanh(beta_opt[idx_corr])
   }
 
   if (type == 'prob_supply_constrained') {
 
     if (prob_without_positive_demand == TRUE) {
 
-      sigma <- sqrt(sigma1^2 + sigma2^2 - 2 * corr * sigma1 * sigma2)
+      sigma <- sqrt(sigma1^2 + sigma2^2 - 2 * rho * sigma1 * sigma2)
       prob_supply_constrained <- pnorm((predicted_demand-predicted_supply) / sigma)
 
     } else {
@@ -879,7 +887,7 @@ print.summary.diseq <- function(diseq_summary_obj) {
 
 export_to_csv <- function (diseq_summary_obj, file) {
 
-  corr <- !is.null(diseq_summary_obj$settings$corr) && diseq_summary_obj$settings$corr == TRUE
+  corr <- !is.null(diseq_summary_obj$corr) && diseq_summary_obj$corr == TRUE
 
   idx_bd <- diseq_summary_obj$coef_indices[['beta_demand']]
   idx_bs <- diseq_summary_obj$coef_indices[['beta_supply']]
