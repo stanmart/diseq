@@ -905,6 +905,9 @@ summary.diseq <- function(diseq_obj, se_type = "IM") {
   if (!is.null(idx_ss)) {
     std_err[idx_ss] <- std_err[idx_ss] * exp(beta_opt[idx_ss])  # Delta-method
   }
+  if (!is.null(idx_corr)) {
+    std_err[idx_corr] <- std_err[idx_corr] * (1 - tanh(beta_opt[idx_ss])^2)  # Delta-method
+  }
   t_value <- coefficients / std_err
   p_value <- pnorm(-abs(t_value)) * 2
 
