@@ -589,6 +589,7 @@ print.diseq <- function(diseq_obj) {
 predict.diseq <- function(diseq_obj,
                           newdata = NULL,
                           type='prob_supply_constrained',
+                          conditional=FALSE,
                           na.action = diseq_obj$na.action,
                           prob_without_positive_demand = FALSE,
                           exact = TRUE) {
@@ -597,6 +598,7 @@ predict.diseq <- function(diseq_obj,
   equal_sigmas <- !is.null(diseq_obj$settings$equal_sigmas) && diseq_obj$settings$equal_sigmas == TRUE
 
   if (is.null(newdata)) {
+
     list[X, coef_indices] = model.matrix.diseq(
       diseq_obj$demand_terms,
       diseq_obj$supply_terms,
@@ -604,19 +606,34 @@ predict.diseq <- function(diseq_obj,
       corr = corr,
       equal_sigmas = equal_sigmas
     )
+    if (conditional) {
+      y <- diseq_obj$model[[all.vars(formula(diseq_obj$demand_terms)[[2]])]] 
+    }
     orig_rownames <- diseq_obj$orig_rownames
+
   } else {
+
+    if (!conditional) {
+      vars_to_select <- union(all.vars(update(diseq_obj$demand_terms, NULL ~ .)),
+                              all.vars(update(diseq_obj$supply_terms, NULL ~ .)))
+    } else {
+      vars_to_select <- union(all.vars(diseq_obj$demand_terms),
+                              all.vars(diseq_obj$supply_terms))
+    }
+
+    newdata_na_cleaned <- na.action(newdata[, vars_to_select, with=FALSE])
     list[X, coef_indices] = model.matrix.diseq(
       update(diseq_obj$demand_terms, NULL ~ .),
       update(diseq_obj$supply_terms, NULL ~ .),
-      data = na.action(newdata[, union(all.vars(update(diseq_obj$demand_terms, NULL ~ .)),
-                                       all.vars(update(diseq_obj$supply_terms, NULL ~ .))
-                                       ),
-                               with=FALSE]),
+      data = newdata_na_cleaned,
       corr = corr,
       equal_sigmas = equal_sigmas
-      )
+    )
+    if (conditional) {
+      y <- newdata_na_cleaned[[all.vars(formula(diseq_obj$demand_terms)[[2]])]] 
+    }
     orig_rownames <- rownames(newdata)
+
   }
   new_rownames <- rownames(X)
 
@@ -625,10 +642,11 @@ predict.diseq <- function(diseq_obj,
   idx_sd <- coef_indices[['sigma_demand']]
   idx_ss <- coef_indices[['sigma_supply']]
   idx_corr <- coef_indices[['sigma_corr']]
-  
+
   beta_opt <- diseq_obj$raw_coefficients
 
-  predicted_demand <- X[, idx_bd] %*% beta_opt[idx_bd]
+  theta_demand <- X[, idx_bd] %*% beta_opt[idx_bd]
+  theta_supply <- X[, idx_bs] %*% beta_opt[idx_bs]
 
   sigma1 <- exp(beta_opt[idx_sd])
   if (is.null(idx_ss)) {
@@ -642,39 +660,33 @@ predict.diseq <- function(diseq_obj,
     rho <- tanh(beta_opt[idx_corr])
   }
 
-  if (type == 'prob_supply_constrained') {
-
-    if (prob_without_positive_demand == TRUE) {
-
-      sigma <- sqrt(sigma1^2 + sigma2^2 - 2 * rho * sigma1 * sigma2)
-      prob_supply_constrained <- pnorm((predicted_demand-predicted_supply) / sigma)
-
-    } else {
-
-      mvnorm_fun <- if (exact == TRUE) {mvnorm_exact} else {mvnorm_approx}
-
-      # A P(D > S metszet D > 0) = P(S - D < 0 metszet -D < 0) együttes eloszlása
-      # levezetés papíron Peti mappájában (térkép!)
-      mu_1 <- predicted_supply - predicted_demand
-      mu_2 <- -predicted_demand
-      sigma_1_bar <- sqrt(sigma1^2 + sigma2^2 - 2 * rho * sigma1 * sigma2)
-      sigma_2_bar <- sigma2
-      corr_coef <- sigma1 / sigma2 - rho
-
-      prob_supply_constrained <- mvnorm_fun(mu_1, sigma_1_bar, mu_2, sigma_2_bar, corr_coef)
-
+  if (type == 'prob_supply_constrained' && conditional == FALSE) {
+    out <- predict_prob_supply_constrained_uncond(
+      theta_demand, theta_supply, sigma1, sigma2, rho,
+      prob_without_positive_demand, exact
+    )
+  } else if (type == 'demand' && conditional == FALSE) {
+    out <- theta_demand
+  } else if (type == 'supply' && conditional == FALSE) {
+    out <- theta_supply
+  } else if (type == 'response' && conditional == FALSE) {
+    out <- pmax(0, pmin(theta_supply, theta_demand))
+  } else if (type == 'prob_supply_constrained' & conditional == TRUE) {
+    if (prob_without_positive_demand) {
+      stop("prob_without_positive_demand is a legacy argument and is not implemented for conditional probabilities")
     }
-
-    out <- prob_supply_constrained
-
-  } else if (type == 'demand') {
-    out <- predicted_demand
-  } else if (type == 'supply') {
-    out <- predicted_supply
-  } else if (type == 'response') {
-    out <- pmax(0, pmin(predicted_supply, predicted_demand))
+    out <- predict_prob_supply_constrained_cond(
+        y, theta_demand, theta_supply, sigma1, sigma2, rho, exact
+    )
+  } else if (type == 'expected_deficit' && conditional == TRUE) {
+    out <- predict_expected_deficit(
+      y, theta_demand, theta_supply, sigma1, sigma2, rho, exact
+    )
+  } else if (type == 'response' && conditional == TRUE) {
+    warning("Chosing type=response and conditional=TRUE returns the observed outcome")
+    out <- y
   } else {
-    stop('Unknown prediction type. Use one of: prob_supply_constrained, demand, supply, response.')
+    stop('Supplied prediction type and conditional/unconditional combination is not implemented.')
   }
 
   if (identical(na.action, na.exclude)) {
@@ -686,6 +698,105 @@ predict.diseq <- function(diseq_obj,
     out_final <- out
   }
   return(out_final)
+
+}
+
+
+predict_prob_supply_constrained_uncond <- function(theta_demand, theta_supply, sigma1, sigma2, rho,
+                                                   prob_without_positive_demand = FALSE, exact = TRUE) {
+
+    if (prob_without_positive_demand == TRUE) {
+      # Legacy code, should not be used
+      sigma <- sqrt(sigma1^2 + sigma2^2 - 2 * rho * sigma1 * sigma2)
+      prob_supply_constrained <- pnorm((theta_demand-theta_supply) / sigma)
+
+    } else {
+
+      mvnorm_fun <- if (exact == TRUE) {mvnorm_exact} else {mvnorm_approx}
+
+      # A P(D > S metszet D > 0) = P(S - D < 0 metszet -D < 0) együttes eloszlása
+      # levezetés papíron Peti mappájában (térkép!)
+      mu_1 <- theta_supply - theta_demand
+      mu_2 <- -theta_demand
+      sigma_1_bar <- sqrt(sigma1^2 + sigma2^2 - 2 * rho * sigma1 * sigma2)
+      sigma_2_bar <- sigma2
+      corr_coef <- sigma1 / sigma2 - rho
+
+      prob_supply_constrained <- mvnorm_fun(mu_1, sigma_1_bar, mu_2, sigma_2_bar, corr_coef)
+
+    }
+
+    return(prob_supply_constrained)
+
+}
+
+
+predict_prob_supply_constrained_cond <- function(y, theta_demand, theta_supply, sigma_d, sigma_s, rho, exact = TRUE) {
+
+  mvnorm_fun <- if (exact == TRUE) {mvnorm_exact} else {mvnorm_approx}
+
+  # y > 0 part
+  mu_D_cond_S_y <- theta_demand + rho * sigma_d / sigma_s * (y - theta_supply)
+  sigma_D_cond_S_y <- sigma_d * sqrt(1 - rho^2)
+
+  mu_S_cond_D_y <- theta_supply + rho * sigma_s / sigma_d * (y - theta_demand)
+  sigma_S_cond_D_y <- sigma_s * sqrt(1 - rho^2)
+
+  P_y_smaller_D_cond_S_eq_y <- 1 - pnorm(y, mean = mu_D_cond_S_y, sd = sigma_D_cond_S_y)
+  P_y_smaller_S_cond_D_eq_y <- 1 - pnorm(y, mean = mu_S_cond_D_y, sd = sigma_S_cond_D_y)
+  f_D <- dnorm(y, mean = theta_demand, sd = sigma_d)
+  f_S <- dnorm(y, mean = theta_supply, sd = sigma_s)
+
+  prob_cond_pos_y <- (P_y_smaller_D_cond_S_eq_y * f_S) / (P_y_smaller_D_cond_S_eq_y * f_S + P_y_smaller_S_cond_D_eq_y * f_D)
+
+  # y == 0 part
+  P_D_smaller_0 <- pnorm(0, theta_demand, sigma_d)
+  P_S_smaller_0 <- pnorm(0, theta_supply, sigma_s)
+  P_both_smaller_0 <- mvnorm_fun(theta_demand, sigma_d, theta_supply, sigma_s, rho)
+
+  prob_cond_zero_y <- (P_S_smaller_0 - P_both_smaller_0) / (P_S_smaller_0 + P_D_smaller_0 - P_both_smaller_0)
+
+  prob_supply_constrained <- ifelse(y > 0, prob_cond_pos_y, prob_cond_zero_y)
+
+  return(prob_supply_constrained)
+
+}
+
+
+predict_expected_deficit <- function(y, theta_demand, theta_supply, sigma_d, sigma_s, rho, exact = TRUE) {
+
+  prob_supply_constrained <- predict_prob_supply_constrained_cond(
+    y, theta_demand, theta_supply, sigma_d, sigma_s, rho, exact = exact
+  )
+
+  # y > 0 part
+  mu_D_cond_S_y <- theta_demand + rho * sigma_d / sigma_s * (y - theta_supply)
+  sigma_D_cond_S_y <- sigma_d * sqrt(1 - rho^2)
+
+  y_bar <- (y - mu_D_cond_S_y) / sigma_D_cond_S_y
+
+  expected_deficit_cond_constr <- mu_D_cond_S_y + sigma_D_cond_S_y * dnorm(y_bar) / (1 - pnorm(y_bar))
+
+  # y == 0 part
+  s <- sigma_d * sqrt(1 - rho^2)
+  for (i in seq_along(y)) {
+    if (y[i] == 0) {
+      fun_to_integrate <- function(z) {
+        m <- theta_demand[i] + rho * sigma_d / sigma_s * (z - theta_supply[i])
+        E_D_star_cond_D_star_greater_0 <- m + s * dnorm(m / s) / pnorm(m / s)
+        f_S_z <- dnorm(z, mean = theta_supply[i], sd = sigma_s)
+        # The ifelse below is needed to get rid of 0 * Inf issues
+        # The limit is of the product is 0 at -Inf so it should be fine
+        return(ifelse(f_S_z == 0, 0, E_D_star_cond_D_star_greater_0 * f_S_z))
+      }
+      numerator <- integrate(fun_to_integrate, -Inf, 0)$value
+      denominator <- pnorm(0, theta_supply[i], sigma_s)
+      expected_deficit_cond_constr[i] <- numerator / denominator
+    }
+
+  }
+
+  return(expected_deficit_cond_constr * prob_supply_constrained)
 
 }
 
@@ -784,8 +895,6 @@ summary.diseq <- function(diseq_obj, se_type = "IM") {
   } else {
     stop("Unknown standard error type. Must be one of: 'IM', 'score', 'robust'")
   }
-
-
 
   raw_t_value <- beta_opt / raw_std_err
   raw_p_value <- pnorm(-abs(raw_t_value)) * 2
