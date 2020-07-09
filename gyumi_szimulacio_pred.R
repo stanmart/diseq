@@ -1,5 +1,6 @@
 source('diseq_maxim.R')
 library(data.table)
+library(ggplot2)
 
 N <- 2000
 
@@ -36,8 +37,12 @@ gyumi_model_SA <- fitdiseq(
 dt[, truncated := gyumi_poz == 0]
 dt[, prob_uncond := predict(gyumi_model_SA, type = "prob_supply_constrained", conditional = FALSE)]
 dt[, prob_cond := predict(gyumi_model_SA, type = "prob_supply_constrained", conditional = TRUE)]
-dt[, exp_deficit := predict(gyumi_model_SA, type = "expected_deficit", conditional = TRUE)]
+dt[, exp_deficit_uncond := predict(gyumi_model_SA, type = "expected_deficit", conditional = FALSE)]
+dt[, exp_deficit_cond := predict(gyumi_model_SA, type = "expected_deficit", conditional = TRUE)]
 
 ggplot(dt) + geom_point(aes(x = prob_uncond, y = prob_cond, color = truncated))
-ggplot(dt) + geom_point(aes(x = prob_uncond, y = exp_deficit, color = truncated))
-ggplot(dt) + geom_point(aes(x = prob_cond, y = exp_deficit, color = truncated))
+ggplot(dt) + geom_point(aes(x = prob_uncond, y = exp_deficit_cond, color = truncated))
+ggplot(dt) + geom_point(aes(x = prob_cond, y = exp_deficit_cond, color = truncated))
+ggplot(dt) + geom_point(aes(x = prob_uncond, y = exp_deficit_uncond, color = truncated))
+ggplot(dt) + geom_point(aes(x = exp_deficit_cond, y = exp_deficit_uncond, color = truncated))
+ggplot(dt) + geom_point(aes(x = prob_cond, y = exp_deficit_uncond, color = truncated))

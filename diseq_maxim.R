@@ -671,6 +671,10 @@ predict.diseq <- function(diseq_obj,
     out <- theta_supply
   } else if (type == 'response' && conditional == FALSE) {
     out <- pmax(0, pmin(theta_supply, theta_demand))
+  } else if (type == 'expected_deficit' && conditional == FALSE) {
+    out <- predict_expected_deficit_uncond(
+      theta_demand, theta_supply, sigma1, sigma2, rho, exact
+    )
   } else if (type == 'prob_supply_constrained' & conditional == TRUE) {
     if (prob_without_positive_demand) {
       stop("prob_without_positive_demand is a legacy argument and is not implemented for conditional probabilities")
@@ -679,7 +683,7 @@ predict.diseq <- function(diseq_obj,
         y, theta_demand, theta_supply, sigma1, sigma2, rho, exact
     )
   } else if (type == 'expected_deficit' && conditional == TRUE) {
-    out <- predict_expected_deficit(
+    out <- predict_expected_deficit_cond(
       y, theta_demand, theta_supply, sigma1, sigma2, rho, exact
     )
   } else if (type == 'response' && conditional == TRUE) {
@@ -763,7 +767,58 @@ predict_prob_supply_constrained_cond <- function(y, theta_demand, theta_supply, 
 }
 
 
-predict_expected_deficit <- function(y, theta_demand, theta_supply, sigma_d, sigma_s, rho, exact = TRUE) {
+predict_expected_deficit_uncond <- function(theta_demand, theta_supply, sigma_d, sigma_s, rho, exact = TRUE) {
+
+  # Preallocate result vectors
+  N <- length(theta_demand)
+  expected_deficit_part_below_0 <- rep(NA, times = N)
+  expected_deficit_part_above_0 <- rep(NA, times = N)
+
+  # Note: D_star = D | S = eta ~ N(m, s)
+
+  s <- sigma_d * sqrt(1 - rho^2)
+
+  for (i in 1 : N) {
+
+    fun_to_integrate_below_0 <- function(eta) {
+      m <- theta_demand[i] + rho * sigma_d / sigma_s * (eta - theta_supply[i])
+      E_D_star_cond_D_star_greater_0 <- m + s * dnorm(m / s) / pnorm(m / s)
+      P_D_star_greater_0 <- 1 - pnorm(0, mean = m, sd = s)
+      f_S_eta <- dnorm(eta, mean = theta_supply[i], sd = sigma_s)
+      # The ifelse below is needed to get rid of 0 * Inf issues
+      # The limit is of the product is 0 at -Inf so it should be fine
+      return(ifelse(
+        P_D_star_greater_0 * f_S_eta == 0,
+        0,
+        E_D_star_cond_D_star_greater_0 * P_D_star_greater_0 * f_S_eta
+      ))
+    }
+
+    fun_to_integrate_above_0 <- function(eta) {
+      m <- theta_demand[i] + rho * sigma_d / sigma_s * (eta - theta_supply[i])
+      E_D_star_cond_D_star_greater_eta <- m + s * dnorm((eta - m) / s) / (1 - pnorm((eta - m) / s))
+      P_D_star_greater_eta <- 1 - pnorm(eta, mean = m, sd = s)
+      f_S_eta <- dnorm(eta, mean = theta_supply[i], sd = sigma_s)
+      # The ifelse below is needed to get rid of 0 * Inf issues
+      # The limit is of the product is 0 at Inf so it should be fine
+      return(ifelse(
+        P_D_star_greater_eta * f_S_eta == 0,
+        0,
+        (E_D_star_cond_D_star_greater_eta - eta) * P_D_star_greater_eta * f_S_eta
+      ))
+    }
+
+    expected_deficit_part_below_0[i] <- integrate(fun_to_integrate_below_0, -Inf, 0)$value
+    expected_deficit_part_above_0[i] <- integrate(fun_to_integrate_above_0, 0, Inf)$value
+  
+  }
+
+  return(expected_deficit_part_below_0 + expected_deficit_part_above_0)
+
+}
+
+
+predict_expected_deficit_cond <- function(y, theta_demand, theta_supply, sigma_d, sigma_s, rho, exact = TRUE) {
 
   prob_supply_constrained <- predict_prob_supply_constrained_cond(
     y, theta_demand, theta_supply, sigma_d, sigma_s, rho, exact = exact
