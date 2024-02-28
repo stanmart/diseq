@@ -23,6 +23,20 @@ list <- structure(NA, class = "result")
 }
 
 
+# Function: loglike.diseq.tobit
+# Description: Calculates the log-likelihood for a disequilibrium model ala Maddala & Nelson (1974).
+# Parameters:
+#   - beta: Vector of coefficients.
+#   - y: Vector of observed dependent variable.
+#   - X: Matrix of independent variables.
+#   - idx_bd: Indices of coefficients for the dependent variable mean equation.
+#   - idx_bs: Indices of coefficients for the dependent variable selection equation.
+#   - idx_sd: Index of the coefficient for the standard deviation of the dependent variable mean equation.
+#   - idx_ss: Index of the coefficient for the standard deviation of the dependent variable selection equation.
+#   - likelihood_bias: Bias term added to the likelihood to avoid taking the logarithm of zero.
+# Returns: 
+#   - The negative log-likelihood value.
+
 loglike.diseq.tobit <- function (beta, y, X, idx_bd, idx_bs, idx_sd, idx_ss, likelihood_bias = 0) {
   theta1 <- X[, idx_bd, drop = FALSE] %*% beta[idx_bd]
   theta2 <- X[, idx_bs, drop = FALSE] %*% beta[idx_bs]
@@ -42,6 +56,17 @@ loglike.diseq.tobit <- function (beta, y, X, idx_bd, idx_bs, idx_sd, idx_ss, lik
 }
 
 
+# Function: mvnorm_exact
+# Description: Calculates the joint probabilities of two normal random variables being below zero.
+# Parameters:
+#   - theta1: Mean of the first normal random variable.
+#   - sigma1: Standard deviation of the first normal random variable.
+#   - theta2: Mean of the second normal random variable.
+#   - sigma2: Standard deviation of the second normal random variable.
+#   - rho: Correlation coefficient of the two normal random variables.
+# Returns:
+#   - The joint probabilities of the two normal random variables being below zero.
+
 mvnorm_exact <- function(theta1, sigma1, theta2, sigma2, rho) {
   mvnorm_scalar_fun <- function(theta1, sigma1, theta2, sigma2, rho) {
     pmvnorm(lower = c(-Inf, -Inf),
@@ -56,6 +81,17 @@ mvnorm_exact <- function(theta1, sigma1, theta2, sigma2, rho) {
   mapply(mvnorm_scalar_fun, theta1, sigma1, theta2, sigma2, rho)
 }
 
+
+# Function: mvnorm_exact
+# Description: Calculates the approximate joint probabilities of two normal random variables being below zero. Faster than mvnorm_exact.
+# Parameters:
+#   - theta1: Mean of the first normal random variable.
+#   - sigma1: Standard deviation of the first normal random variable.
+#   - theta2: Mean of the second normal random variable.
+#   - sigma2: Standard deviation of the second normal random variable.
+#   - rho: Correlation coefficient of the two normal random variables.
+# Returns:
+#   - The joint probabilities of the two normal random variables being below zero.
 
 mvnorm_approx <- function(theta1, sigma1, theta2, sigma2, rho) {
   a <- -theta1 / sigma1
@@ -75,6 +111,20 @@ mvnorm_approx <- function(theta1, sigma1, theta2, sigma2, rho) {
   return(F_00)
 }
 
+
+# Function: loglike.diseq.tobit.corr
+# Description: Calculates the log-likelihood for a disequilibrium model with correlated errors.
+# Parameters:
+#   - beta: Vector of coefficients.
+#   - y: Vector of observed dependent variable.
+#   - X: Matrix of independent variables.
+#   - idx_bd: Indices of coefficients for the dependent variable mean equation.
+#   - idx_bs: Indices of coefficients for the dependent variable selection equation.
+#   - idx_sd: Index of the coefficient for the standard deviation of the dependent variable mean equation.
+#   - idx_ss: Index of the coefficient for the standard deviation of the dependent variable selection equation.
+#   - likelihood_bias: Bias term added to the likelihood to avoid taking the logarithm of zero.
+# Returns: 
+#   - The negative log-likelihood value.
 
 loglike.diseq.tobit.corr <- function (beta, y, X, idx_bd, idx_bs, idx_sd, idx_ss, idx_corr, likelihood_bias = 0) {
   theta1 <- X[, idx_bd, drop = FALSE] %*% beta[idx_bd]
@@ -118,6 +168,17 @@ loglike.diseq.tobit.corr <- function (beta, y, X, idx_bd, idx_bs, idx_sd, idx_ss
 }
 
 
+# Function: model.matrix.diseq
+# Description: Creates the model matrix and the corresponding coefficient indices for a disequilibrium model.
+# Parameters:
+#   - demand_formula: Formula for the demand equation.
+#   - supply_formula: Formula for the supply equation.
+#   - data: Data frame containing the variables in the formulas.
+#   - corr: Whether the model has correlated errors.
+#   - equal_sigmas: Whether the errors on the demand and supply sides are assumed to have equal standard deviations.
+# Returns:
+#   - A list containing the model matrix and the coefficient indices.
+
 model.matrix.diseq <- function (demand_formula, supply_formula, data, corr=FALSE, equal_sigmas=FALSE) {
   X_d <- model.matrix(formula(demand_formula), data = data)
   X_s <- model.matrix(formula(supply_formula), data = data)
@@ -135,6 +196,30 @@ model.matrix.diseq <- function (demand_formula, supply_formula, data, corr=FALSE
   list(cbind(X_d[rows, ], X_s[rows, ]), coef_indices)
 }
 
+
+# Function: fitdiseq
+# Description: Fits a disequilibrium model to the data.
+# Parameters:
+#   - demand_formula: Formula for the demand equation.
+#   - supply_formula: Formula for the supply equation.
+#   - data: Data frame containing the variables in the formulas.
+#   - lb: Lower bounds for the coefficients.
+#   - ub: Upper bounds for the coefficients.
+#   - init: Initial values for the coefficients.
+#   - initpop: Initial population for the DE algorithm.
+#   - equal_sigmas: Whether the errors on the demand and supply sides are assumed to have equal standard deviations.
+#   - corr: Whether the model has correlated errors.
+#   - optimizer: The optimization algorithm to use. Can be 'SA', 'DE', or 'optim'.
+#   - control: Control parameters for the optimization algorithm.
+#   - method: The optimization method to use when optimizer is 'optim'.
+#   - na.action: The NA handling function to use.
+#   - random_seed: The random seed to use.
+#   - elapsed_times: A list of elapsed times from previous optimization runs.
+#   - prev_history: A list of optimization traces from previous optimization runs.
+#   - fixed_params: A vector of fixed parameters.
+#   - likelihood_bias: A bias term added to the likelihood to avoid taking the logarithm of zero.
+# Returns:
+#   - The fitted disequilibrium model (diseq object).
 
 fitdiseq <- function(demand_formula,
                      supply_formula,
@@ -353,6 +438,30 @@ fitdiseq <- function(demand_formula,
 }
 
 
+# Function: refitdiseq
+# Description: Refits a disequilibrium model to the data. Non-specified parameters are taken from the original model.
+# Parameters:
+#   - diseq_obj: The disequilibrium model to refit.
+#   - demand_formula: Formula for the demand equation.
+#   - supply_formula: Formula for the supply equation.
+#   - data: Data frame containing the variables in the formulas.
+#   - lb: Lower bounds for the coefficients.
+#   - ub: Upper bounds for the coefficients.
+#   - init: Initial values for the coefficients.
+#   - initpop: Initial population for the DE algorithm.
+#   - corr: Whether the model has correlated errors.
+#   - equal_sigmas: Whether the errors on the demand and supply sides are assumed to have equal standard deviations.
+#   - optimizer: The optimization algorithm to use. Can be 'SA', 'DE', or 'optim'.
+#   - control: Control parameters for the optimization algorithm.
+#   - method: The optimization method to use when optimizer is 'optim'.
+#   - na.action: The NA handling function to use.
+#   - random_seed: The random seed to use.
+#   - elapsed_times: A list of elapsed times from previous optimization runs.
+#   - prev_history: A list of optimization traces from previous optimization runs.
+#   - fixed_params: A vector of fixed parameters.
+#   - likelihood_bias: A bias term added to the likelihood to avoid taking the logarithm of zero.
+#   - continue: Whether to continue from the parameters of the previous model.
+
 refitdiseq <- function(diseq_obj,
                        demand_formula = formula(diseq_obj$demand_terms),
                        supply_formula = formula(diseq_obj$supply_terms),
@@ -451,6 +560,20 @@ refitdiseq <- function(diseq_obj,
 }
 
 
+# Function: ll_contributions
+# Description: Calculates the contribution of each observation to the log-likelihood.
+# Parameters:
+#   - demand_formula: Formula for the demand equation.
+#   - supply_formula: Formula for the supply equation.
+#   - data: Data frame containing the variables in the formulas.
+#   - beta: Vector of coefficients.
+#   - equal_sigmas: Whether the errors on the demand and supply sides are assumed to have equal standard deviations.
+#   - na.action: The NA handling function to use.
+#   - corr: Whether the model has correlated errors.
+#   - likelihood_bias: A bias term added to the likelihood to avoid taking the logarithm of zero.
+# Returns:
+#   - A data table containing the contributions to the log-likelihood.
+
 ll_contributions <- function(demand_formula = NULL,
                              supply_formula = NULL,
                              data = NULL,
@@ -539,6 +662,13 @@ ll_contributions <- function(demand_formula = NULL,
 }
 
 
+# Function: model_ll_contributions
+# Description: Convenience function to calculate the log-likelihood contributions for a fitted disequilibrium model.
+# Parameters:
+#   - diseq_obj: The fitted disequilibrium model.
+# Returns:
+#   - A data table containing the contributions to the log-likelihood.
+
 model_ll_contributions <- function(diseq_obj) {
 
   corr <- !is.null(diseq_obj$settings$corr) && diseq_obj$settings$corr == TRUE
@@ -556,6 +686,9 @@ model_ll_contributions <- function(diseq_obj) {
 
 }
 
+
+# Function: print.diseq
+# Description: Prints the fitted disequilibrium model, including the demand and supply equations and the coefficients.
 
 print.diseq <- function(diseq_obj) {
 
@@ -585,6 +718,19 @@ print.diseq <- function(diseq_obj) {
 
 }
 
+
+# Function: predict.diseq
+# Description: Predicts from a fitted disequilibrium model.
+# Parameters:
+#   - diseq_obj: The fitted disequilibrium model.
+#   - newdata: Data frame containing the variables in the formulas. If NULL, the original data is used.
+#   - type: The type of prediction to make. Can be 'prob_supply_constrained', 'demand', 'supply', 'response', or 'expected_deficit'.
+#   - conditional: Whether to make conditional predictions.
+#   - na.action: The NA handling function to use.
+#   - prob_without_positive_demand: Whether negative demand values should be included in the probability of supply constraint. Deprecated.
+#   - exact: Whether to use the exact or approximate method for the joint probabilities.
+# Returns:
+#   - The predicted values.
 
 predict.diseq <- function(diseq_obj,
                           newdata = NULL,
@@ -706,6 +852,9 @@ predict.diseq <- function(diseq_obj,
 }
 
 
+# Function: predict_prob_supply_constrained_uncond
+# Description: Predicts the unconditional probability of being supply constrained.
+
 predict_prob_supply_constrained_uncond <- function(theta_demand, theta_supply, sigma1, sigma2, rho,
                                                    prob_without_positive_demand = FALSE, exact = TRUE) {
 
@@ -734,6 +883,9 @@ predict_prob_supply_constrained_uncond <- function(theta_demand, theta_supply, s
 
 }
 
+
+# Function: predict_prob_supply_constrained_cond
+# Description: Predicts the conditional probability of being supply constrained.
 
 predict_prob_supply_constrained_cond <- function(y, theta_demand, theta_supply, sigma_d, sigma_s, rho, exact = TRUE) {
 
@@ -766,6 +918,9 @@ predict_prob_supply_constrained_cond <- function(y, theta_demand, theta_supply, 
 
 }
 
+
+# Function: predict_prob_supply_constrained_uncond
+# Description: Predicts the unconditional expected deficit (demand - supply).
 
 predict_expected_deficit_uncond <- function(theta_demand, theta_supply, sigma_d, sigma_s, rho, exact = TRUE) {
 
@@ -818,6 +973,9 @@ predict_expected_deficit_uncond <- function(theta_demand, theta_supply, sigma_d,
 }
 
 
+# Function: predict_prob_supply_constrained_uncond
+# Description: Predicts the conditional expected deficit (demand - supply).
+
 predict_expected_deficit_cond <- function(y, theta_demand, theta_supply, sigma_d, sigma_s, rho, exact = TRUE) {
 
   prob_supply_constrained <- predict_prob_supply_constrained_cond(
@@ -855,6 +1013,19 @@ predict_expected_deficit_cond <- function(y, theta_demand, theta_supply, sigma_d
 
 }
 
+
+# Function: score.diseq.tobit
+# Description: Calculates the score function for a fitted disequilibrium model.
+# Parameters:
+#   - beta: The vector of coefficients.
+#   - y: The observed outcome.
+#   - X: The model matrix.
+#   - idx_bd: Indices of the demand coefficients.
+#   - idx_bs: Indices of the supply coefficients.
+#   - idx_sd: Index of the demand sigma.
+#   - idx_ss: Index of the supply sigma.
+# Returns:
+#   - The scores.
 
 score.diseq.tobit <- function(beta, y, X, idx_bd, idx_bs, idx_sd, idx_ss) {
   theta1 <-X[, idx_bd, drop = FALSE] %*% beta[idx_bd]
@@ -907,6 +1078,14 @@ score.diseq.tobit <- function(beta, y, X, idx_bd, idx_bs, idx_sd, idx_ss) {
   }
 }
 
+
+# Function: summary.diseq
+# Description: Calculate standard errors and p values for a fitted disequilibrium model.
+# Parameters:
+#   - diseq_obj: The fitted disequilibrium model.
+#   - se_type: The type of standard errors to calculate. Can be 'IM', 'score', or 'robust'.
+# Returns:
+#   - A summary object.
 
 summary.diseq <- function(diseq_obj, se_type = "IM") {
 
@@ -1003,6 +1182,11 @@ summary.diseq <- function(diseq_obj, se_type = "IM") {
 }
 
 
+# Function: print.summary.diseq
+# Description: Pretty-prints a summary of a fitted disequilibrium model.
+# Parameters:
+#   - diseq_summary_obj: The summary object.
+
 print.summary.diseq <- function(diseq_summary_obj) {
 
   corr <- !is.null(diseq_summary_obj$corr) && diseq_summary_obj$corr == TRUE
@@ -1051,6 +1235,12 @@ print.summary.diseq <- function(diseq_summary_obj) {
   cat('\n\n')
 }
 
+
+# Function: export_to_csv
+# Description: Exports a summary of a fitted disequilibrium model to a CSV file.
+# Parameters:
+#   - diseq_summary_obj: The summary object.
+#   - file: The file path to export to.
 
 export_to_csv <- function (diseq_summary_obj, file) {
 
@@ -1114,6 +1304,14 @@ export_to_csv <- function (diseq_summary_obj, file) {
   write(paste('Number of observations;', diseq_summary_obj$N, ';;;'), file = file, append = TRUE)
   write(paste('Log-likelihood;', diseq_summary_obj$log_likelihood, ';;;'), file = file, append = TRUE)
 }
+
+
+# Function: export_all
+# Description: Exports a summary and the model object itself for a fitted disequilibrium model to a folder.
+# Parameters:
+#   - diseq_obj: The fitted disequilibrium model.
+#   - summary_obj: The summary object. If NULL, it will be calculated.
+#   - folder: The folder to export to.
 
 export_all <- function(diseq_obj,
                        summary_obj = summary(diseq_obj),
