@@ -7,9 +7,7 @@ library(ggplot2)
 # Preliminaries #
 #################
 
-setwd('X:/PSF/_Common/Személyek/BanaiÁdám/Horváth Ákos/panel/diseq_R')
-
-source('02_Kodok/diseq-to_run_v1/diseq_maxim.R')
+source('diseq_maxim.R')
 
 dt <- fread('01_Adatbazisok/01_panel_diseq.csv', integer64 = 'double')
 

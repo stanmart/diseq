@@ -1,5 +1,4 @@
-setwd('X:/_workflow/EUFA01')
-source('02_Kódok/Disequilibrium_model/diseq_maxim.R')
+source('diseq_maxim.R')
 library(data.table)
 
 N <- 10000
