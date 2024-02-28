@@ -1,6 +1,6 @@
 # MLE estimation of the disequilibrium model of Maddala &amp; Nelson (1974)
 
-The code was written by Peter Lang and Martin Stancsics for a one-time project.
+The code was written by Péter Lang and Martin Stancsics for a one-off project.
 It is provided as is, without much in the way of documentation or error handling.
 Nevertheless, it should be possible to use the code as a starting point for other implementations of the disequilibrium model.
 
